@@ -1,0 +1,28 @@
+# livekit.yaml
+
+port: 7880 # Port principal pour les connexions WebSocket et les appels API
+
+bind_addresses:
+  - ""
+
+rtc:
+  tcp_port: 7881 # Port TCP de secours pour WebRTC
+  port_range_start: 50000 # Plage de ports UDP pour les flux média
+  port_range_end: 60000
+  use_external_ip: false # Crucial en local : empêche LiveKit de chercher ton IP publique
+
+keys:
+  # Remplacer par la paire générée par `livekit-server --dev`
+  # Format -> apiKey: apiSecret
+  devkey: secret 
+
+logging:
+  json: false # Logs lisibles pour un humain dans le terminal
+  level: info # Utilise 'debug' si tu rencontres des problèmes de connexion
+
+webhook:
+  api_key: devkey # La clé utilisée pour signer cryptographiquement le webhook (sécurité)
+  urls:
+    # L'adresse de ton backend FastAPI. 
+    # Note : Si LiveKit est dans Docker et FastAPI en natif, utilise http://host.docker.internal:8000/api/webhooks
+    - http://127.0.0.1:8000/api/webhooks
