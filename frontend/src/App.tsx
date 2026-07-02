@@ -17,6 +17,8 @@ type Consultation = {
   room_name: string;
   expires_at: string;
   token_ttl_seconds: number;
+  status: 'active' | 'ended';
+  ended_at: string | null;
 };
 
 type JoinState = {
@@ -41,7 +43,7 @@ function App() {
 
   const leaveCall = () => {
     setJoinState(null);
-    setStatus('Call ended. You can request a new LiveKit token with the same consultation ID while the consultation is still valid.');
+    setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
   };
 
   const requestJson = async <T,>(url: string, init?: RequestInit): Promise<T> => {
@@ -51,11 +53,69 @@ function App() {
     });
 
     if (!response.ok) {
-      const message = await response.text();
-      throw new Error(`Request failed (${response.status}): ${message}`);
+      let message = '';
+
+      try {
+        const payload = await response.json() as { detail?: unknown };
+        const detail = payload.detail;
+        if (typeof detail === 'string') {
+          message = detail;
+        } else if (detail && typeof detail === 'object' && 'message' in detail) {
+          message = String((detail as { message: unknown }).message ?? '');
+        } else {
+          message = JSON.stringify(payload);
+        }
+      } catch {
+        message = await response.text();
+      }
+
+      throw new Error(`Request failed (${response.status}): ${message || 'Unknown error'}`);
     }
 
     return response.json() as Promise<T>;
+  };
+
+  const endConsultation = async () => {
+    if (!joinState || !consultationId.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      const ended = await requestJson<{
+        consultation_id: string;
+        room_name: string;
+        status: 'ended';
+        ended_at: string;
+        ended_by: string;
+      }>(`${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/end`, {
+        method: 'POST',
+        body: JSON.stringify({
+          participant_name: joinState.participantName,
+          role: joinState.role,
+        }),
+      });
+
+      setConsultation((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          status: ended.status,
+          ended_at: ended.ended_at,
+        };
+      });
+      setJoinState(null);
+      setStatus(`Consultation ended by ${ended.ended_by}. Rejoin is now blocked.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not end consultation');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const createConsultation = async () => {
@@ -123,7 +183,12 @@ function App() {
             <strong>{joinState.participantName}</strong>
             <span>{joinState.role} · {joinState.roomName} · token TTL {Math.round(joinState.expiresInSeconds / 60)} min</span>
           </div>
-          <button type="button" onClick={() => setJoinState(null)}>Leave test</button>
+          <div>
+            {joinState.role === 'doctor' && (
+              <button type="button" onClick={endConsultation} disabled={busy}>End consultation</button>
+            )}
+            <button type="button" onClick={leaveCall}>Leave test</button>
+          </div>
         </div>
         <LiveKitRoom
           video={joinState.role !== 'observer'}
@@ -200,6 +265,8 @@ function App() {
             <div><dt>Consultation ID</dt><dd>{consultation.consultation_id}</dd></div>
             <div><dt>LiveKit room</dt><dd>{consultation.room_name}</dd></div>
             <div><dt>Session expires</dt><dd>{new Date(consultation.expires_at).toLocaleString()}</dd></div>
+            <div><dt>Status</dt><dd>{consultation.status}</dd></div>
+            <div><dt>Ended at</dt><dd>{consultation.ended_at ? new Date(consultation.ended_at).toLocaleString() : 'Not ended'}</dd></div>
             <div><dt>Token TTL</dt><dd>{Math.round(consultation.token_ttl_seconds / 60)} minutes</dd></div>
           </dl>
         ) : (

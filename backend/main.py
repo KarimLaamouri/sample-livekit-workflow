@@ -4,6 +4,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +13,12 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
-TOKEN_TTL_SECONDS = 15 * 60
+TOKEN_TTL_SECONDS = 2 * 60
 CONSULTATION_TTL_MINUTES = 60
 MAX_AUDIT_EVENTS = 200
 
 Role = Literal["doctor", "patient", "observer"]
+ConsultationStatus = Literal["active", "ended"]
 
 app = FastAPI(title="Tachafy Teleconsultation Demo")
 
@@ -45,6 +47,8 @@ class CreateConsultationResponse(BaseModel):
     room_name: str
     expires_at: str
     token_ttl_seconds: int
+    status: ConsultationStatus
+    ended_at: str | None
 
 
 class TokenRequest(BaseModel):
@@ -59,6 +63,19 @@ class TokenResponse(BaseModel):
     participant_name: str
     role: Role
     expires_in_seconds: int
+
+
+class EndConsultationRequest(BaseModel):
+    participant_name: str = Field(min_length=1, max_length=80)
+    role: Role
+
+
+class EndConsultationResponse(BaseModel):
+    consultation_id: str
+    room_name: str
+    status: ConsultationStatus
+    ended_at: str
+    ended_by: str
 
 
 def utc_now() -> datetime:
@@ -86,7 +103,29 @@ def require_livekit_credentials() -> tuple[str, str]:
     return api_key, api_secret
 
 
-def get_consultation_or_404(consultation_id: str) -> dict[str, Any]:
+def resolve_livekit_api_url() -> str:
+    configured = (
+        os.getenv("LIVEKIT_API_URL")
+        or os.getenv("LIVEKIT_URL")
+        or "http://localhost:7880"
+    ).strip()
+
+    normalized = configured
+    if configured.startswith("ws://"):
+        normalized = "http://" + configured[len("ws://"):]
+    elif configured.startswith("wss://"):
+        normalized = "https://" + configured[len("wss://"):]
+    elif not configured.startswith("http://") and not configured.startswith("https://"):
+        normalized = f"http://{configured}"
+
+    return normalized.rstrip("/")
+
+
+def get_consultation_or_404(
+    consultation_id: str,
+    *,
+    include_ended: bool = False,
+) -> dict[str, Any]:
     consultation = consultations.get(consultation_id)
 
     if consultation is None:
@@ -97,7 +136,58 @@ def get_consultation_or_404(consultation_id: str) -> dict[str, Any]:
         consultations.pop(consultation_id, None)
         raise HTTPException(status_code=410, detail="Consultation expired")
 
+    if not include_ended and consultation.get("status") == "ended":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CONSULTATION_ENDED",
+                "message": "Consultation has ended",
+            },
+        )
+
     return consultation
+
+
+def ensure_role_allowed_for_consultation(
+    consultation: dict[str, Any],
+    *,
+    participant_name: str,
+    role: Role,
+) -> None:
+    if role == "doctor" and participant_name != consultation["doctor_name"]:
+        raise HTTPException(status_code=403, detail="Participant is not assigned as doctor")
+
+    if role == "patient" and participant_name != consultation["patient_name"]:
+        raise HTTPException(status_code=403, detail="Participant is not assigned as patient")
+
+
+def require_doctor_actor(consultation: dict[str, Any], payload: EndConsultationRequest) -> None:
+    if payload.role != "doctor":
+        raise HTTPException(status_code=403, detail="Only doctor can end a consultation")
+
+    if payload.participant_name != consultation["doctor_name"]:
+        raise HTTPException(status_code=403, detail="Participant is not assigned as doctor")
+
+
+async def terminate_room(room_name: str) -> None:
+    livekit_api_url = resolve_livekit_api_url()
+
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            participants = await lkapi.room.list_participants(api.ListParticipantsRequest(room=room_name))
+            for participant in participants.participants:
+                await lkapi.room.remove_participant(
+                    api.RoomParticipantIdentity(room=room_name, identity=participant.identity)
+                )
+
+            await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
+    except Exception as exc:  # best effort cleanup to avoid blocking consultation closure
+        audit(
+            "consultation.room_termination_failed",
+            room_name=room_name,
+            livekit_api_url=livekit_api_url,
+            error=str(exc),
+        )
 
 
 def grants_for(role: Role, room_name: str) -> api.VideoGrants:
@@ -150,8 +240,22 @@ def build_token(
 
 
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    health_status: dict[str, Any] = {
+        "api": "ok",
+        "livekit": "unknown",
+        "livekit_api_url": resolve_livekit_api_url(),
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(health_status["livekit_api_url"], timeout=2.0)
+            health_status["livekit"] = "online" if response.status_code == 200 else "degraded"
+            health_status["livekit_http_status"] = response.status_code
+    except httpx.RequestError:
+        health_status["livekit"] = "offline"
+
+    return health_status
 
 
 @app.post("/api/consultations", response_model=CreateConsultationResponse)
@@ -169,6 +273,9 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         "patient_name": payload.patient_name,
         "created_at": utc_now(),
         "expires_at": expires_at,
+        "status": "active",
+        "ended_at": None,
+        "ended_by": None,
     }
 
     audit(
@@ -184,6 +291,8 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         room_name=room_name,
         expires_at=expires_at.isoformat(),
         token_ttl_seconds=TOKEN_TTL_SECONDS,
+        status="active",
+        ended_at=None,
     )
 
 
@@ -194,6 +303,11 @@ async def create_consultation_token(
 ) -> TokenResponse:
     consultation = get_consultation_or_404(consultation_id)
     room_name = consultation["room_name"]
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.participant_name,
+        role=payload.role,
+    )
 
     token = build_token(
         consultation_id=consultation_id,
@@ -221,29 +335,47 @@ async def create_consultation_token(
     )
 
 
-@app.get("/api/get-token")
-async def get_token(
-    room_name: str,
-    participant_name: str,
-    role: Role = "doctor",
-) -> dict[str, str | int]:
-    token = build_token(
-        consultation_id="legacy-manual-test",
-        room_name=room_name,
-        participant_name=participant_name,
-        role=role,
-    )
+@app.post(
+    "/api/consultations/{consultation_id}/end",
+    response_model=EndConsultationResponse,
+)
+async def end_consultation(
+    consultation_id: str,
+    payload: EndConsultationRequest,
+) -> EndConsultationResponse:
+    consultation = get_consultation_or_404(consultation_id, include_ended=True)
+    require_doctor_actor(consultation, payload)
+
+    if consultation["status"] == "ended":
+        return EndConsultationResponse(
+            consultation_id=consultation_id,
+            room_name=consultation["room_name"],
+            status="ended",
+            ended_at=consultation["ended_at"],
+            ended_by=consultation["ended_by"],
+        )
+
+    ended_at = utc_now().isoformat()
+    consultation["status"] = "ended"
+    consultation["ended_at"] = ended_at
+    consultation["ended_by"] = payload.participant_name
+
+    await terminate_room(consultation["room_name"])
 
     audit(
-        "token.issued.legacy",
-        consultation_id="legacy-manual-test",
-        room_name=room_name,
-        participant_name=participant_name,
-        role=role,
-        token_ttl_seconds=TOKEN_TTL_SECONDS,
+        "consultation.ended",
+        consultation_id=consultation_id,
+        room_name=consultation["room_name"],
+        ended_by=payload.participant_name,
     )
 
-    return {"token": token, "expires_in_seconds": TOKEN_TTL_SECONDS}
+    return EndConsultationResponse(
+        consultation_id=consultation_id,
+        room_name=consultation["room_name"],
+        status="ended",
+        ended_at=ended_at,
+        ended_by=payload.participant_name,
+    )
 
 
 @app.post("/api/webhooks")
