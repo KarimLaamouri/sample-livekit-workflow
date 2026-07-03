@@ -14,7 +14,7 @@ rtc:
 keys:
   # Remplacer par la paire générée par `livekit-server --dev`
   # Format -> apiKey: apiSecret
-  devkey: secret 
+  devkey: super_secret_key_that_is_at_least_32_characters_long_123456789 
 
 logging:
   json: false # Logs lisibles pour un humain dans le terminal

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
 from pydantic import BaseModel, Field
@@ -26,7 +26,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5173"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -91,6 +91,35 @@ def audit(event_type: str, **details: Any) -> None:
         }
     )
     del audit_events[:-MAX_AUDIT_EVENTS]
+
+
+def find_consultation_by_room_name(room_name: str) -> dict[str, Any] | None:
+    for consultation in consultations.values():
+        if consultation["room_name"] == room_name:
+            return consultation
+    return None
+
+
+def parse_livekit_identity(identity: str) -> tuple[str | None, str | None, str | None]:
+    if not identity:
+        return None, None, None
+
+    parts = identity.split(":")
+    if len(parts) >= 3:
+        return parts[0], ":".join(parts[1:-1]), parts[-1]
+    if len(parts) == 2:
+        return parts[0], parts[1], None
+    return None, identity, None
+
+
+def parse_room_metadata(metadata: str | None) -> Any:
+    if not metadata:
+        return None
+
+    try:
+        return json.loads(metadata)
+    except ValueError:
+        return metadata
 
 
 def require_livekit_credentials() -> tuple[str, str]:
@@ -378,14 +407,72 @@ async def end_consultation(
     )
 
 
+# @app.post("/api/webhooks")
+# async def livekit_webhook(request: Request) -> dict[str, str]:
+#     body = await request.body()
+#     audit(
+#         "livekit.webhook.received",
+#         content_type=request.headers.get("content-type"),
+#         body_size=len(body),
+#     )
+#     return {"status": "received"}
+
+
 @app.post("/api/webhooks")
-async def livekit_webhook(request: Request) -> dict[str, str]:
-    body = await request.body()
+async def livekit_webhook(
+    request: Request,
+    authorization: str = Header(None),
+) -> dict[str, str]:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization Header")
+
+    api_key, api_secret = require_livekit_credentials()
+    token_verifier = api.TokenVerifier(api_key=api_key, api_secret=api_secret)
+    webhook_receiver = api.WebhookReceiver(token_verifier)
+
+    body_bytes = await request.body()
+    body_str = body_bytes.decode("utf-8")
+
+    try:
+        event = webhook_receiver.receive(body_str, authorization)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    event_type = getattr(event, "event", "unknown")
+    room = getattr(event, "room", None)
+    room_name = getattr(room, "name", None)
+    room_sid = getattr(room, "sid", None)
+    room_metadata = parse_room_metadata(getattr(room, "metadata", None))
+    
+    consultation = find_consultation_by_room_name(room_name) if room_name else None
+    consultation_id = consultation["consultation_id"] if consultation else None
+
+    # Structure the participant data (if present in the event)
+    participant = getattr(event, "participant", None)
+    participant_data = None
+    
+    if participant is not None:
+        identity = getattr(participant, "identity", None)
+        role, participant_name, participant_tag = parse_livekit_identity(identity)
+        
+        participant_data = {
+            "identity": identity,
+            "role": role,
+            "name": participant_name,
+            "tag": participant_tag,
+            "state": getattr(participant, "state", None)
+        }
+
     audit(
-        "livekit.webhook.received",
-        content_type=request.headers.get("content-type"),
-        body_size=len(body),
+        f"livekit.{event_type}", 
+        consultation_id=consultation_id,
+        room_name=room_name,
+        room_sid=room_sid,
+        room_metadata=room_metadata,
+        participant=participant_data, # Will be None for room-only events, or a dict if participant is involved
+        source="webhook",
     )
+
     return {"status": "received"}
 
 
