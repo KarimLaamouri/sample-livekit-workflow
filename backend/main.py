@@ -8,6 +8,8 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from google.protobuf.message import Message
+from google.protobuf.json_format import MessageToDict
 from livekit import api
 from pydantic import BaseModel, Field
 
@@ -35,6 +37,7 @@ app.add_middleware(
 
 consultations: dict[str, dict[str, Any]] = {}
 audit_events: list[dict[str, Any]] = []
+processed_webhook_event_ids: set[str] = set()
 
 
 class CreateConsultationRequest(BaseModel):
@@ -82,12 +85,48 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _clean_audit_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, sub_value in value.items():
+            cleaned_value = _clean_audit_value(sub_value)
+            if cleaned_value is not None:
+                cleaned[key] = cleaned_value
+        return cleaned or None
+    if isinstance(value, list):
+        cleaned = [_clean_audit_value(item) for item in value]
+        cleaned = [item for item in cleaned if item is not None]
+        return cleaned or None
+    return value
+
+
+def _proto_message_to_dict(proto: Any) -> dict[str, Any] | None:
+    if not isinstance(proto, Message):
+        return None
+    return MessageToDict(
+        proto,
+        preserving_proto_field_name=True,
+        use_integers_for_enums=False,
+    )
+
+
 def audit(event_type: str, **details: Any) -> None:
+    cleaned_details = {
+        key: _clean_audit_value(value)
+        for key, value in details.items()
+        if value is not None
+    }
+    cleaned_details = {
+        key: value
+        for key, value in cleaned_details.items()
+        if value is not None
+    }
+
     audit_events.append(
         {
             "timestamp": utc_now().isoformat(),
             "event_type": event_type,
-            **details,
+            **cleaned_details,
         }
     )
     del audit_events[:-MAX_AUDIT_EVENTS]
@@ -120,6 +159,102 @@ def parse_room_metadata(metadata: str | None) -> Any:
         return json.loads(metadata)
     except ValueError:
         return metadata
+
+
+def build_room_audit_data(room: Any) -> dict[str, Any] | None:
+    if room is None:
+        return None
+
+    room_data = _proto_message_to_dict(room)
+    if room_data is None:
+        return None
+
+    if "sid" in room_data:
+        room_data["room_id"] = room_data.pop("sid")
+    elif "id" in room_data:
+        room_data["room_id"] = room_data.pop("id")
+
+    if "name" in room_data:
+        room_data["room_name"] = room_data["name"]
+
+    if "metadata" in room_data:
+        room_data["metadata"] = parse_room_metadata(room_data["metadata"])
+
+    return room_data
+
+
+def build_participant_audit_data(participant: Any) -> dict[str, Any] | None:
+    if participant is None:
+        return None
+
+    participant_dict: dict[str, Any] | None = None
+    if isinstance(participant, Message):
+        participant_dict = _proto_message_to_dict(participant)
+
+    if participant_dict is not None:
+        identity = participant_dict.get("identity")
+        role, participant_name, participant_tag = parse_livekit_identity(identity)
+
+        participant_data: dict[str, Any] = {
+            "participant_id": participant_dict.get("sid") or participant_dict.get("id"),
+            "identity": identity,
+            "role": role,
+            "name": participant_name or participant_dict.get("name"),
+            "tag": participant_tag,
+            "state_name": participant_dict.get("state"),
+            "joined_at": participant_dict.get("joined_at"),
+            "metadata": parse_room_metadata(participant_dict.get("metadata")),
+            "is_publisher": participant_dict.get("is_publisher"),
+        }
+
+        if "tracks" in participant_dict:
+            participant_data["tracks"] = participant_dict["tracks"]
+
+        return {k: v for k, v in participant_data.items() if v is not None}
+
+    identity = getattr(participant, "identity", None)
+    role, participant_name, participant_tag = parse_livekit_identity(identity)
+
+    raw_state = getattr(participant, "state", None)
+    participant_state = None
+    if raw_state is not None:
+        participant_state = {
+            0: "JOINING",
+            1: "JOINED",
+            2: "ACTIVE",
+            3: "DISCONNECTED",
+        }.get(raw_state, str(raw_state))
+
+    participant_data: dict[str, Any] = {
+        "participant_id": getattr(participant, "sid", None) or getattr(participant, "id", None),
+        "identity": identity,
+        "role": role,
+        "name": participant_name or getattr(participant, "name", None),
+        "tag": participant_tag,
+        "state": raw_state,
+        "state_name": participant_state,
+        "joined_at": getattr(participant, "joined_at", None),
+        "metadata": parse_room_metadata(getattr(participant, "metadata", None)),
+        "is_publisher": getattr(participant, "is_publisher", None),
+    }
+
+    tracks = getattr(participant, "tracks", None)
+    if tracks:
+        participant_data["tracks"] = [
+            {
+                "track_id": getattr(track, "track_id", None),
+                "name": getattr(track, "name", None),
+                "type": getattr(track, "type", None),
+                "source": getattr(track, "source", None),
+                "muted": getattr(track, "muted", None),
+                "simulcast": getattr(track, "simulcast", None),
+                "metadata": getattr(track, "metadata", None),
+            }
+            for track in tracks
+            if track is not None
+        ]
+
+    return {k: v for k, v in participant_data.items() if v is not None}
 
 
 def require_livekit_credentials() -> tuple[str, str]:
@@ -438,38 +573,97 @@ async def livekit_webhook(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
+    event_id = getattr(event, "id", None)
+    if event_id is not None:
+        if event_id in processed_webhook_event_ids:
+            return {"status": "duplicate ignored"}
+        processed_webhook_event_ids.add(event_id)
+
     event_type = getattr(event, "event", "unknown")
     room = getattr(event, "room", None)
-    room_name = getattr(room, "name", None)
-    room_sid = getattr(room, "sid", None)
-    room_metadata = parse_room_metadata(getattr(room, "metadata", None))
+    room_data = build_room_audit_data(room)
+    room_name = None
+    if room_data is not None:
+        room_name = room_data.get("room_name") or room_data.get("name")
+    room_sid = room_data.get("room_id") if room_data else None
+    room_metadata = room_data.get("metadata") if room_data else None
     
     consultation = find_consultation_by_room_name(room_name) if room_name else None
     consultation_id = consultation["consultation_id"] if consultation else None
 
-    # Structure the participant data (if present in the event)
     participant = getattr(event, "participant", None)
     participant_data = None
-    
-    if participant is not None:
-        identity = getattr(participant, "identity", None)
-        role, participant_name, participant_tag = parse_livekit_identity(identity)
-        
-        participant_data = {
-            "identity": identity,
-            "role": role,
-            "name": participant_name,
-            "tag": participant_tag,
-            "state": getattr(participant, "state", None)
+    has_participant = False
+    if hasattr(event, "HasField"):
+        try:
+            has_participant = event.HasField("participant")
+        except Exception:
+            has_participant = participant is not None
+    else:
+        has_participant = participant is not None
+
+    if has_participant and participant is not None:
+        participant_data = build_participant_audit_data(participant)
+
+    track = getattr(event, "track", None)
+    track_info = None
+    track_type_label = None
+    track_source_label = None
+
+    has_track = False
+    if hasattr(event, "HasField"):
+        try:
+            has_track = event.HasField("track")
+        except Exception:
+            has_track = track is not None
+    else:
+        has_track = track is not None
+
+    if has_track and track is not None:
+        raw_track_type = getattr(track, "type", None)
+        raw_track_source = getattr(track, "source", None)
+
+        track_type_label = None
+        track_source_label = None
+        if isinstance(raw_track_type, int):
+            track_type_label = {
+                0: "audio",
+                1: "video",
+            }.get(raw_track_type)
+        elif raw_track_type is not None:
+            track_type_label = str(raw_track_type).lower()
+
+        if isinstance(raw_track_source, int):
+            track_source_label = {
+                0: "unknown",
+                1: "camera",
+                2: "microphone",
+                3: "screen_share",
+                4: "screen_share_audio",
+            }.get(raw_track_source)
+        elif raw_track_source is not None:
+            track_source_label = str(raw_track_source).lower()
+
+        track_info = {
+            "type": raw_track_type,
+            "source": raw_track_source,
         }
 
+    event_label = f"livekit.{event_type}"
+    if track_type_label or track_source_label:
+        label_parts = []
+        if track_type_label:
+            label_parts.append(track_type_label)
+        if track_source_label:
+            label_parts.append(track_source_label)
+        event_label = f"{event_label} ({': '.join(label_parts)})"
+
     audit(
-        f"livekit.{event_type}", 
+        event_label,
         consultation_id=consultation_id,
-        room_name=room_name,
-        room_sid=room_sid,
-        room_metadata=room_metadata,
-        participant=participant_data, # Will be None for room-only events, or a dict if participant is involved
+        room=room_data,
+        participant=participant_data,
+        track=track_info,
         source="webhook",
     )
 
