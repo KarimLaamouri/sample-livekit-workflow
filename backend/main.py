@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 TOKEN_TTL_SECONDS = 2 * 60
+CONSULTATION_TTL_SECONDS = 120
 CONSULTATION_TTL_MINUTES = 60
 MAX_AUDIT_EVENTS = 200
 
@@ -139,6 +140,65 @@ def find_consultation_by_room_name(room_name: str) -> dict[str, Any] | None:
     return None
 
 
+def find_consultation_by_room_metadata(room_metadata: Any) -> dict[str, Any] | None:
+    if isinstance(room_metadata, dict):
+        consultation_id = room_metadata.get("consultation_id")
+        if isinstance(consultation_id, str):
+            return consultations.get(consultation_id)
+    return None
+
+
+def _is_room_termination_event(event_type: str) -> bool:
+    normalized = (event_type or "").lower()
+    return normalized.startswith("room.") and any(
+        keyword in normalized
+        for keyword in ("ended", "closed", "destroyed", "expired", "finished")
+    )
+
+
+def _mark_consultation_ended_by_system(consultation: dict[str, Any]) -> None:
+    if consultation.get("status") == "ended":
+        return
+
+    ended_at = _set_consultation_ended_state(consultation, ended_by="system")
+
+    if ended_at is None:
+        return
+
+    audit(
+        "consultation.ended",
+        consultation_id=consultation["consultation_id"],
+        room_name=consultation["room_name"],
+        ended_by="system",
+        source="webhook",
+    )
+
+
+def _set_consultation_ended_state(
+    consultation: dict[str, Any],
+    *,
+    ended_by: str,
+) -> str | None:
+    if consultation.get("status") == "ended":
+        return consultation.get("ended_at")
+
+    ended_at = utc_now().isoformat()
+    consultation["status"] = "ended"
+    consultation["ended_at"] = ended_at
+    consultation["ended_by"] = ended_by
+    return ended_at
+
+
+def _build_consultation_ended_response(consultation: dict[str, Any]) -> EndConsultationResponse:
+    return EndConsultationResponse(
+        consultation_id=consultation["consultation_id"],
+        room_name=consultation["room_name"],
+        status="ended",
+        ended_at=consultation["ended_at"],
+        ended_by=consultation["ended_by"],
+    )
+
+
 def parse_livekit_identity(identity: str) -> tuple[str | None, str | None, str | None]:
     if not identity:
         return None, None, None
@@ -149,6 +209,56 @@ def parse_livekit_identity(identity: str) -> tuple[str | None, str | None, str |
     if len(parts) == 2:
         return parts[0], parts[1], None
     return None, identity, None
+
+
+def _build_participant_track_data(tracks: Any) -> list[dict[str, Any]] | None:
+    if not tracks:
+        return None
+
+    return [
+        {
+            "track_id": getattr(track, "track_id", None),
+            "name": getattr(track, "name", None),
+            "type": getattr(track, "type", None),
+            "source": getattr(track, "source", None),
+            "muted": getattr(track, "muted", None),
+            "simulcast": getattr(track, "simulcast", None),
+            "metadata": getattr(track, "metadata", None),
+        }
+        for track in tracks
+        if track is not None
+    ]
+
+
+def _build_participant_audit_data(
+    *,
+    participant_id: Any,
+    identity: Any,
+    role: Any,
+    name: Any,
+    tag: Any,
+    state: Any,
+    joined_at: Any,
+    metadata: Any,
+    is_publisher: Any,
+    tracks: Any = None,
+) -> dict[str, Any]:
+    participant_data: dict[str, Any] = {
+        "participant_id": participant_id,
+        "identity": identity,
+        "role": role,
+        "name": name,
+        "tag": tag,
+        "state": state,
+        "joined_at": joined_at,
+        "metadata": metadata,
+        "is_publisher": is_publisher,
+    }
+
+    if tracks is not None:
+        participant_data["tracks"] = tracks
+
+    return {k: v for k, v in participant_data.items() if v is not None}
 
 
 def parse_room_metadata(metadata: str | None) -> Any:
@@ -174,9 +284,6 @@ def build_room_audit_data(room: Any) -> dict[str, Any] | None:
     elif "id" in room_data:
         room_data["room_id"] = room_data.pop("id")
 
-    if "name" in room_data:
-        room_data["room_name"] = room_data["name"]
-
     if "metadata" in room_data:
         room_data["metadata"] = parse_room_metadata(room_data["metadata"])
 
@@ -187,74 +294,42 @@ def build_participant_audit_data(participant: Any) -> dict[str, Any] | None:
     if participant is None:
         return None
 
-    participant_dict: dict[str, Any] | None = None
     if isinstance(participant, Message):
         participant_dict = _proto_message_to_dict(participant)
+        if participant_dict is None:
+            return None
 
-    if participant_dict is not None:
         identity = participant_dict.get("identity")
         role, participant_name, participant_tag = parse_livekit_identity(identity)
-
-        participant_data: dict[str, Any] = {
-            "participant_id": participant_dict.get("sid") or participant_dict.get("id"),
-            "identity": identity,
-            "role": role,
-            "name": participant_name or participant_dict.get("name"),
-            "tag": participant_tag,
-            "state_name": participant_dict.get("state"),
-            "joined_at": participant_dict.get("joined_at"),
-            "metadata": parse_room_metadata(participant_dict.get("metadata")),
-            "is_publisher": participant_dict.get("is_publisher"),
-        }
-
-        if "tracks" in participant_dict:
-            participant_data["tracks"] = participant_dict["tracks"]
-
-        return {k: v for k, v in participant_data.items() if v is not None}
+        return _build_participant_audit_data(
+            participant_id=participant_dict.get("sid") or participant_dict.get("id"),
+            identity=identity,
+            role=role,
+            name=participant_name or participant_dict.get("name"),
+            tag=participant_tag,
+            state=participant_dict.get("state"),
+            joined_at=participant_dict.get("joined_at"),
+            metadata=parse_room_metadata(participant_dict.get("metadata")),
+            is_publisher=participant_dict.get("is_publisher"),
+            tracks=participant_dict.get("tracks") if "tracks" in participant_dict else None,
+        )
 
     identity = getattr(participant, "identity", None)
     role, participant_name, participant_tag = parse_livekit_identity(identity)
 
     raw_state = getattr(participant, "state", None)
-    participant_state = None
-    if raw_state is not None:
-        participant_state = {
-            0: "JOINING",
-            1: "JOINED",
-            2: "ACTIVE",
-            3: "DISCONNECTED",
-        }.get(raw_state, str(raw_state))
-
-    participant_data: dict[str, Any] = {
-        "participant_id": getattr(participant, "sid", None) or getattr(participant, "id", None),
-        "identity": identity,
-        "role": role,
-        "name": participant_name or getattr(participant, "name", None),
-        "tag": participant_tag,
-        "state": raw_state,
-        "state_name": participant_state,
-        "joined_at": getattr(participant, "joined_at", None),
-        "metadata": parse_room_metadata(getattr(participant, "metadata", None)),
-        "is_publisher": getattr(participant, "is_publisher", None),
-    }
-
-    tracks = getattr(participant, "tracks", None)
-    if tracks:
-        participant_data["tracks"] = [
-            {
-                "track_id": getattr(track, "track_id", None),
-                "name": getattr(track, "name", None),
-                "type": getattr(track, "type", None),
-                "source": getattr(track, "source", None),
-                "muted": getattr(track, "muted", None),
-                "simulcast": getattr(track, "simulcast", None),
-                "metadata": getattr(track, "metadata", None),
-            }
-            for track in tracks
-            if track is not None
-        ]
-
-    return {k: v for k, v in participant_data.items() if v is not None}
+    return _build_participant_audit_data(
+        participant_id=getattr(participant, "sid", None) or getattr(participant, "id", None),
+        identity=identity,
+        role=role,
+        name=participant_name or getattr(participant, "name", None),
+        tag=participant_tag,
+        state=raw_state,
+        joined_at=getattr(participant, "joined_at", None),
+        metadata=parse_room_metadata(getattr(participant, "metadata", None)),
+        is_publisher=getattr(participant, "is_publisher", None),
+        tracks=_build_participant_track_data(getattr(participant, "tracks", None)),
+    )
 
 
 def require_livekit_credentials() -> tuple[str, str]:
@@ -329,8 +404,21 @@ def require_doctor_actor(consultation: dict[str, Any], payload: EndConsultationR
     if payload.role != "doctor":
         raise HTTPException(status_code=403, detail="Only doctor can end a consultation")
 
-    if payload.participant_name != consultation["doctor_name"]:
-        raise HTTPException(status_code=403, detail="Participant is not assigned as doctor")
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.participant_name,
+        role=payload.role,
+    )
+
+
+def _event_field_present(event: Any, field_name: str, fallback_value: Any) -> bool:
+    if hasattr(event, "HasField"):
+        try:
+            return event.HasField(field_name)
+        except Exception:
+            return fallback_value is not None
+
+    return fallback_value is not None
 
 
 async def terminate_room(room_name: str) -> None:
@@ -373,6 +461,37 @@ def grants_for(role: Role, room_name: str) -> api.VideoGrants:
         can_publish_data=True,
         can_update_own_metadata=True,
     )
+
+
+async def ensure_room_exists_for_consultation(consultation: dict[str, Any]) -> None:
+    room_name = consultation["room_name"]
+    livekit_api_url = resolve_livekit_api_url()
+
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            response = await lkapi.room.list_rooms(api.ListRoomsRequest(names=[room_name]))
+            if not getattr(response, "rooms", []):
+                _mark_consultation_ended_by_system(consultation)
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "CONSULTATION_ENDED",
+                        "message": "Consultation room no longer exists",
+                    },
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        audit(
+            "consultation.room_existence_check_failed",
+            consultation_id=consultation["consultation_id"],
+            room_name=room_name,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to verify consultation room state",
+        )
 
 
 def build_token(
@@ -429,6 +548,14 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
     consultation_id = secrets.token_urlsafe(12)
     room_name = f"tachafy-{consultation_id}"
     expires_at = utc_now() + timedelta(minutes=CONSULTATION_TTL_MINUTES)
+    room_metadata = json.dumps(
+        {
+            "consultation_id": consultation_id,
+            "doctor_name": payload.doctor_name,
+            "patient_name": payload.patient_name,
+        },
+        separators=(",", ":"),
+    )
 
     consultations[consultation_id] = {
         "consultation_id": consultation_id,
@@ -449,6 +576,30 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         doctor_name=payload.doctor_name,
         patient_name=payload.patient_name,
     )
+
+    livekit_api_url = resolve_livekit_api_url()
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            await lkapi.room.create_room(
+                api.CreateRoomRequest(
+                    name=room_name,
+                    departure_timeout=CONSULTATION_TTL_SECONDS,
+                    metadata=room_metadata,
+                )
+            )
+    except Exception as exc:
+        consultations.pop(consultation_id, None)
+        audit(
+            "consultation.room_creation_failed",
+            consultation_id=consultation_id,
+            room_name=room_name,
+            livekit_api_url=livekit_api_url,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to create consultation room",
+        )
 
     return CreateConsultationResponse(
         consultation_id=consultation_id,
@@ -472,6 +623,8 @@ async def create_consultation_token(
         participant_name=payload.participant_name,
         role=payload.role,
     )
+
+    await ensure_room_exists_for_consultation(consultation)
 
     token = build_token(
         consultation_id=consultation_id,
@@ -511,18 +664,15 @@ async def end_consultation(
     require_doctor_actor(consultation, payload)
 
     if consultation["status"] == "ended":
-        return EndConsultationResponse(
-            consultation_id=consultation_id,
-            room_name=consultation["room_name"],
-            status="ended",
-            ended_at=consultation["ended_at"],
-            ended_by=consultation["ended_by"],
-        )
+        return _build_consultation_ended_response(consultation)
 
-    ended_at = utc_now().isoformat()
-    consultation["status"] = "ended"
-    consultation["ended_at"] = ended_at
-    consultation["ended_by"] = payload.participant_name
+    ended_at = _set_consultation_ended_state(
+        consultation,
+        ended_by=payload.participant_name,
+    )
+
+    if ended_at is None:
+        return _build_consultation_ended_response(consultation)
 
     await terminate_room(consultation["room_name"])
 
@@ -533,13 +683,7 @@ async def end_consultation(
         ended_by=payload.participant_name,
     )
 
-    return EndConsultationResponse(
-        consultation_id=consultation_id,
-        room_name=consultation["room_name"],
-        status="ended",
-        ended_at=ended_at,
-        ended_by=payload.participant_name,
-    )
+    return _build_consultation_ended_response(consultation)
 
 
 # @app.post("/api/webhooks")
@@ -588,19 +732,20 @@ async def livekit_webhook(
     room_sid = room_data.get("room_id") if room_data else None
     room_metadata = room_data.get("metadata") if room_data else None
     
-    consultation = find_consultation_by_room_name(room_name) if room_name else None
+    consultation = None
+    if room_name:
+        consultation = find_consultation_by_room_name(room_name)
+    if consultation is None and room_metadata is not None:
+        consultation = find_consultation_by_room_metadata(room_metadata)
+
     consultation_id = consultation["consultation_id"] if consultation else None
+
+    if _is_room_termination_event(event_type) and consultation is not None:
+        _mark_consultation_ended_by_system(consultation)
 
     participant = getattr(event, "participant", None)
     participant_data = None
-    has_participant = False
-    if hasattr(event, "HasField"):
-        try:
-            has_participant = event.HasField("participant")
-        except Exception:
-            has_participant = participant is not None
-    else:
-        has_participant = participant is not None
+    has_participant = _event_field_present(event, "participant", participant)
 
     if has_participant and participant is not None:
         participant_data = build_participant_audit_data(participant)
@@ -610,14 +755,7 @@ async def livekit_webhook(
     track_type_label = None
     track_source_label = None
 
-    has_track = False
-    if hasattr(event, "HasField"):
-        try:
-            has_track = event.HasField("track")
-        except Exception:
-            has_track = track is not None
-    else:
-        has_track = track is not None
+    has_track = _event_field_present(event, "track", track)
 
     if has_track and track is not None:
         raw_track_type = getattr(track, "type", None)
