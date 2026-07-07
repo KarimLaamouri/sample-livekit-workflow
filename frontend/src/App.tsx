@@ -7,8 +7,8 @@ import {
 import '@livekit/components-styles';
 import './App.css';
 
-const API_URL = 'http://localhost:8000';
-const LIVEKIT_URL = 'ws://localhost:7880';
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+const LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
 
 type Role = 'doctor' | 'patient' | 'observer';
 
@@ -66,21 +66,21 @@ const parseApiError = async (response: Response): Promise<ApiError> => {
   if (typeof detail === 'string') {
     message = detail;
   } else if (detail && typeof detail === 'object') {
-    if ('message' in detail) {
-      message = String((detail as { message: unknown }).message ?? message);
+    const errorDetail = detail as { message?: unknown; code?: unknown };
+
+    if ('message' in errorDetail) {
+      message = String(errorDetail.message ?? message);
+    } else if (!('code' in errorDetail)) {
+      message = JSON.stringify(errorDetail);
     }
 
-    if ('code' in detail && typeof (detail as { code: unknown }).code === 'string') {
-      code = (detail as { code: string }).code;
+    if (typeof errorDetail.code === 'string') {
+      code = errorDetail.code;
     }
-  } else if (typeof detail === 'number') {
+  } else if (typeof detail === 'number' || typeof detail === 'boolean') {
     message = String(detail);
-  } else if (typeof detail === 'boolean') {
+  } else if (detail !== null) {
     message = String(detail);
-  } else if (typeof detail === 'object' && detail !== null) {
-    message = JSON.stringify(detail);
-  } else if (typeof detail === 'string' && detail.length > 0) {
-    message = detail;
   }
 
   const error = new Error(message || `Request failed (${response.status})`) as ApiError;
@@ -138,7 +138,65 @@ const createErrorNotice = (error: unknown, actionLabel: string): ErrorNotice => 
   };
 };
 
-function App() {
+type NoticeCardProps = {
+  notice: ErrorNotice;
+  kind: 'error' | 'info';
+  onDismiss: () => void;
+};
+
+type CreateConsultationPanelProps = {
+  doctorName: string;
+  patientName: string;
+  busy: boolean;
+  onDoctorNameChange: (value: string) => void;
+  onPatientNameChange: (value: string) => void;
+  onSubmit: () => void;
+};
+
+type JoinConsultationPanelProps = {
+  consultationId: string;
+  participantName: string;
+  role: Role;
+  busy: boolean;
+  onConsultationIdChange: (value: string) => void;
+  onParticipantNameChange: (value: string) => void;
+  onRoleChange: (value: Role) => void;
+  onSubmit: () => void;
+};
+
+type CallViewProps = {
+  joinState: JoinState;
+  busy: boolean;
+  onEndConsultation: () => void;
+  onLeaveCall: () => void;
+};
+
+type ConsultationController = {
+  doctorName: string;
+  patientName: string;
+  participantName: string;
+  role: Role;
+  consultationId: string;
+  consultation: Consultation | null;
+  joinState: JoinState | null;
+  status: string;
+  errorNotice: ErrorNotice | null;
+  sessionNotice: ErrorNotice | null;
+  busy: boolean;
+  setDoctorName: (value: string) => void;
+  setPatientName: (value: string) => void;
+  setParticipantName: (value: string) => void;
+  setRole: (value: Role) => void;
+  setConsultationId: (value: string) => void;
+  setErrorNotice: (value: ErrorNotice | null) => void;
+  setSessionNotice: (value: ErrorNotice | null) => void;
+  createConsultation: () => Promise<void>;
+  joinConsultation: () => Promise<void>;
+  endConsultation: () => Promise<void>;
+  leaveCall: () => void;
+};
+
+function useConsultation(): ConsultationController {
   const [doctorName, setDoctorName] = useState('Dr. Tachafy');
   const [patientName, setPatientName] = useState('Patient Demo');
   const [participantName, setParticipantName] = useState('Dr. Tachafy');
@@ -389,35 +447,192 @@ function App() {
     }
   };
 
-  if (joinState !== null) {
+  return {
+    doctorName,
+    patientName,
+    participantName,
+    role,
+    consultationId,
+    consultation,
+    joinState,
+    status,
+    errorNotice,
+    sessionNotice,
+    busy,
+    setDoctorName,
+    setPatientName,
+    setParticipantName,
+    setRole,
+    setConsultationId,
+    setErrorNotice,
+    setSessionNotice,
+    createConsultation,
+    joinConsultation,
+    endConsultation,
+    leaveCall,
+  };
+}
+
+function NoticeCard({ notice, kind, onDismiss }: NoticeCardProps) {
+  if (kind === 'error') {
     return (
-      <div className="call-shell">
-        <div className="call-strip">
-          <div>
-            <strong>{joinState.participantName}</strong>
-            <span>{joinState.role} · {joinState.roomName} · token TTL {Math.round(joinState.expiresInSeconds / 60)} min</span>
-          </div>
-          <div>
-            {joinState.role === 'doctor' && (
-              <button type="button" onClick={endConsultation} disabled={busy}>End consultation</button>
-            )}
-            <button type="button" onClick={leaveCall}>Leave test</button>
-          </div>
+      <div className="notice-card" role="alert" aria-live="polite">
+        <div className="notice-copy">
+          <p className="notice-title">{notice.title}</p>
+          <p className="notice-message">{notice.message}</p>
+          <p className="notice-suggestion">{notice.suggestion}</p>
         </div>
-        <LiveKitRoom
-          video={joinState.role !== 'observer'}
-          audio={joinState.role !== 'observer'}
-          token={joinState.token}
-          serverUrl={LIVEKIT_URL}
-          onDisconnected={leaveCall}
-          data-lk-theme="default"
-          style={{ height: 'calc(100dvh - 56px)' }}
-        >
-          <VideoConference />
-          <RoomAudioRenderer />
-        </LiveKitRoom>
+        <div className="notice-actions">
+          {typeof notice.status === 'number' && (
+            <span className="notice-badge">HTTP {notice.status}</span>
+          )}
+          <button type="button" className="ghost-button" onClick={onDismiss}>
+            Dismiss
+          </button>
+        </div>
       </div>
     );
+  }
+
+  return (
+    <div className="notice-card notice-card--info" aria-live="polite">
+      <div className="notice-copy">
+        <p className="notice-title">{notice.title}</p>
+        <p className="notice-message">{notice.message}</p>
+        <p className="notice-suggestion">{notice.suggestion}</p>
+      </div>
+      <div className="notice-actions">
+        <button type="button" className="ghost-button" onClick={onDismiss}>
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CreateConsultationPanel({
+  doctorName,
+  patientName,
+  busy,
+  onDoctorNameChange,
+  onPatientNameChange,
+  onSubmit,
+}: CreateConsultationPanelProps) {
+  return (
+    <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      <div className="panel-heading">
+        <span>1</span>
+        <h2>Create consultation</h2>
+      </div>
+      <label>
+        Doctor name
+        <input value={doctorName} onChange={(event) => onDoctorNameChange(event.target.value)} />
+      </label>
+      <label>
+        Patient name
+        <input value={patientName} onChange={(event) => onPatientNameChange(event.target.value)} />
+      </label>
+      <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Create secure room'}</button>
+    </form>
+  );
+}
+
+function JoinConsultationPanel({
+  consultationId,
+  participantName,
+  role,
+  busy,
+  onConsultationIdChange,
+  onParticipantNameChange,
+  onRoleChange,
+  onSubmit,
+}: JoinConsultationPanelProps) {
+  return (
+    <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      <div className="panel-heading">
+        <span>2</span>
+        <h2>Join with role</h2>
+      </div>
+      <label>
+        Consultation ID
+        <input value={consultationId} onChange={(event) => onConsultationIdChange(event.target.value)} placeholder="Paste ID here" />
+      </label>
+      <label>
+        Participant display name
+        <input value={participantName} onChange={(event) => onParticipantNameChange(event.target.value)} />
+      </label>
+      <label>
+        Role
+        <select value={role} onChange={(event) => onRoleChange(event.target.value as Role)}>
+          <option value="doctor">Doctor: publish + subscribe</option>
+          <option value="patient">Patient: publish + subscribe</option>
+          <option value="observer">Observer: subscribe only</option>
+        </select>
+      </label>
+      <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Issue token and join'}</button>
+    </form>
+  );
+}
+
+function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewProps) {
+  return (
+    <div className="call-shell">
+      <div className="call-strip">
+        <div>
+          <strong>{joinState.participantName}</strong>
+          <span>{joinState.role} · {joinState.roomName} · token TTL {Math.round(joinState.expiresInSeconds / 60)} min</span>
+        </div>
+        <div>
+          {joinState.role === 'doctor' && (
+            <button type="button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
+          )}
+          <button type="button" onClick={onLeaveCall}>Leave test</button>
+        </div>
+      </div>
+      <LiveKitRoom
+        video={joinState.role !== 'observer'}
+        audio={joinState.role !== 'observer'}
+        token={joinState.token}
+        serverUrl={LIVEKIT_URL}
+        onDisconnected={onLeaveCall}
+        data-lk-theme="default"
+        style={{ height: 'calc(100dvh - 56px)' }}
+      >
+        <VideoConference />
+        <RoomAudioRenderer />
+      </LiveKitRoom>
+    </div>
+  );
+}
+
+function App() {
+  const {
+    doctorName,
+    patientName,
+    participantName,
+    role,
+    consultationId,
+    consultation,
+    joinState,
+    status,
+    errorNotice,
+    sessionNotice,
+    busy,
+    setDoctorName,
+    setPatientName,
+    setParticipantName,
+    setRole,
+    setConsultationId,
+    setErrorNotice,
+    setSessionNotice,
+    createConsultation,
+    joinConsultation,
+    endConsultation,
+    leaveCall,
+  } = useConsultation();
+
+  if (joinState !== null) {
+    return <CallView joinState={joinState} busy={busy} onEndConsultation={endConsultation} onLeaveCall={leaveCall} />;
   }
 
   return (
@@ -431,79 +646,34 @@ function App() {
       </section>
 
       <section className="workflow-grid">
-        <form className="panel" onSubmit={(event) => { event.preventDefault(); createConsultation(); }}>
-          <div className="panel-heading">
-            <span>1</span>
-            <h2>Create consultation</h2>
-          </div>
-          <label>
-            Doctor name
-            <input value={doctorName} onChange={(event) => setDoctorName(event.target.value)} />
-          </label>
-          <label>
-            Patient name
-            <input value={patientName} onChange={(event) => setPatientName(event.target.value)} />
-          </label>
-          <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Create secure room'}</button>
-        </form>
+        <CreateConsultationPanel
+          doctorName={doctorName}
+          patientName={patientName}
+          busy={busy}
+          onDoctorNameChange={setDoctorName}
+          onPatientNameChange={setPatientName}
+          onSubmit={createConsultation}
+        />
 
-        <form className="panel" onSubmit={(event) => { event.preventDefault(); joinConsultation(); }}>
-          <div className="panel-heading">
-            <span>2</span>
-            <h2>Join with role</h2>
-          </div>
-          <label>
-            Consultation ID
-            <input value={consultationId} onChange={(event) => setConsultationId(event.target.value)} placeholder="Paste ID here" />
-          </label>
-          <label>
-            Participant display name
-            <input value={participantName} onChange={(event) => setParticipantName(event.target.value)} />
-          </label>
-          <label>
-            Role
-            <select value={role} onChange={(event) => setRole(event.target.value as Role)}>
-              <option value="doctor">Doctor: publish + subscribe</option>
-              <option value="patient">Patient: publish + subscribe</option>
-              <option value="observer">Observer: subscribe only</option>
-            </select>
-          </label>
-          <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Issue token and join'}</button>
-        </form>
+        <JoinConsultationPanel
+          consultationId={consultationId}
+          participantName={participantName}
+          role={role}
+          busy={busy}
+          onConsultationIdChange={setConsultationId}
+          onParticipantNameChange={setParticipantName}
+          onRoleChange={setRole}
+          onSubmit={joinConsultation}
+        />
       </section>
 
       <section className="status-panel">
         <h2>Session state</h2>
         {errorNotice && (
-          <div className="notice-card" role="alert" aria-live="polite">
-            <div className="notice-copy">
-              <p className="notice-title">{errorNotice.title}</p>
-              <p className="notice-message">{errorNotice.message}</p>
-              <p className="notice-suggestion">{errorNotice.suggestion}</p>
-            </div>
-            <div className="notice-actions">
-              {typeof errorNotice.status === 'number' && (
-                <span className="notice-badge">HTTP {errorNotice.status}</span>
-              )}
-              <button type="button" className="ghost-button" onClick={() => setErrorNotice(null)}>
-                Dismiss
-              </button>
-            </div>
-          </div>
+          <NoticeCard notice={errorNotice} kind="error" onDismiss={() => setErrorNotice(null)} />
         )}
         {!errorNotice && sessionNotice && (
-          <div className="notice-card notice-card--info" aria-live="polite">
-            <div className="notice-copy">
-              <p className="notice-title">{sessionNotice.title}</p>
-              <p className="notice-message">{sessionNotice.message}</p>
-              <p className="notice-suggestion">{sessionNotice.suggestion}</p>
-            </div>
-            <div className="notice-actions">
-              <button type="button" className="ghost-button" onClick={() => setSessionNotice(null)}>
-                Dismiss
-              </button>
-            </div>
-          </div>
+          <NoticeCard notice={sessionNotice} kind="info" onDismiss={() => setSessionNotice(null)} />
         )}
         {consultation ? (
           <dl>

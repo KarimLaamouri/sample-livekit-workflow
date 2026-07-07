@@ -1,6 +1,8 @@
 ﻿import json
+import logging
 import os
 import secrets
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -16,9 +18,22 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 TOKEN_TTL_SECONDS = 2 * 60
-CONSULTATION_TTL_SECONDS = 120
+DEPARTURE_TIMEOUT = 120
 CONSULTATION_TTL_MINUTES = 60
 MAX_AUDIT_EVENTS = 200
+TRACK_TYPE_LABELS = {
+    0: "audio",
+    1: "video",
+}
+TRACK_SOURCE_LABELS = {
+    0: "unknown",
+    1: "camera",
+    2: "microphone",
+    3: "screen_share",
+    4: "screen_share_audio",
+}
+
+logger = logging.getLogger(__name__)
 
 Role = Literal["doctor", "patient", "observer"]
 ConsultationStatus = Literal["active", "ended"]
@@ -38,7 +53,7 @@ app.add_middleware(
 
 consultations: dict[str, dict[str, Any]] = {}
 audit_events: list[dict[str, Any]] = []
-processed_webhook_event_ids: set[str] = set()
+processed_webhook_event_ids: OrderedDict[str, None] = OrderedDict()
 
 
 class CreateConsultationRequest(BaseModel):
@@ -117,11 +132,6 @@ def audit(event_type: str, **details: Any) -> None:
         for key, value in details.items()
         if value is not None
     }
-    cleaned_details = {
-        key: value
-        for key, value in cleaned_details.items()
-        if value is not None
-    }
 
     audit_events.append(
         {
@@ -133,14 +143,14 @@ def audit(event_type: str, **details: Any) -> None:
     del audit_events[:-MAX_AUDIT_EVENTS]
 
 
-def find_consultation_by_room_name(room_name: str) -> dict[str, Any] | None:
+def _find_consultation_by_room_name(room_name: str) -> dict[str, Any] | None:
     for consultation in consultations.values():
         if consultation["room_name"] == room_name:
             return consultation
     return None
 
 
-def find_consultation_by_room_metadata(room_metadata: Any) -> dict[str, Any] | None:
+def _find_consultation_by_room_metadata(room_metadata: Any) -> dict[str, Any] | None:
     if isinstance(room_metadata, dict):
         consultation_id = room_metadata.get("consultation_id")
         if isinstance(consultation_id, str):
@@ -174,6 +184,20 @@ def _mark_consultation_ended_by_system(consultation: dict[str, Any]) -> None:
     )
 
 
+def _normalize_processed_webhook_event_ids() -> None:
+    while len(processed_webhook_event_ids) > MAX_AUDIT_EVENTS:
+        processed_webhook_event_ids.popitem(last=False)
+
+
+def _remember_webhook_event_id(event_id: str) -> bool:
+    if event_id in processed_webhook_event_ids:
+        return False
+
+    processed_webhook_event_ids[event_id] = None
+    _normalize_processed_webhook_event_ids()
+    return True
+
+
 def _set_consultation_ended_state(
     consultation: dict[str, Any],
     *,
@@ -200,6 +224,8 @@ def _build_consultation_ended_response(consultation: dict[str, Any]) -> EndConsu
 
 
 def parse_livekit_identity(identity: str) -> tuple[str | None, str | None, str | None]:
+    # LiveKit identities are expected to look like role:name:randomsuffix.
+    # A participant name that contains ":" will misparse with this format.
     if not identity:
         return None, None, None
 
@@ -261,7 +287,7 @@ def _build_participant_audit_data(
     return {k: v for k, v in participant_data.items() if v is not None}
 
 
-def parse_room_metadata(metadata: str | None) -> Any:
+def _parse_room_metadata(metadata: str | None) -> Any:
     if not metadata:
         return None
 
@@ -271,7 +297,7 @@ def parse_room_metadata(metadata: str | None) -> Any:
         return metadata
 
 
-def build_room_audit_data(room: Any) -> dict[str, Any] | None:
+def _build_room_audit_data(room: Any) -> dict[str, Any] | None:
     if room is None:
         return None
 
@@ -285,12 +311,12 @@ def build_room_audit_data(room: Any) -> dict[str, Any] | None:
         room_data["room_id"] = room_data.pop("id")
 
     if "metadata" in room_data:
-        room_data["metadata"] = parse_room_metadata(room_data["metadata"])
+        room_data["metadata"] = _parse_room_metadata(room_data["metadata"])
 
     return room_data
 
 
-def build_participant_audit_data(participant: Any) -> dict[str, Any] | None:
+def _build_participant_audit_data_from_participant(participant: Any) -> dict[str, Any] | None:
     if participant is None:
         return None
 
@@ -309,7 +335,7 @@ def build_participant_audit_data(participant: Any) -> dict[str, Any] | None:
             tag=participant_tag,
             state=participant_dict.get("state"),
             joined_at=participant_dict.get("joined_at"),
-            metadata=parse_room_metadata(participant_dict.get("metadata")),
+            metadata=_parse_room_metadata(participant_dict.get("metadata")),
             is_publisher=participant_dict.get("is_publisher"),
             tracks=participant_dict.get("tracks") if "tracks" in participant_dict else None,
         )
@@ -326,9 +352,124 @@ def build_participant_audit_data(participant: Any) -> dict[str, Any] | None:
         tag=participant_tag,
         state=raw_state,
         joined_at=getattr(participant, "joined_at", None),
-        metadata=parse_room_metadata(getattr(participant, "metadata", None)),
+        metadata=_parse_room_metadata(getattr(participant, "metadata", None)),
         is_publisher=getattr(participant, "is_publisher", None),
         tracks=_build_participant_track_data(getattr(participant, "tracks", None)),
+    )
+
+
+async def _verify_and_parse_webhook(request: Request, authorization: str | None) -> Any | None:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization Header")
+
+    api_key, api_secret = require_livekit_credentials()
+    token_verifier = api.TokenVerifier(api_key=api_key, api_secret=api_secret)
+    webhook_receiver = api.WebhookReceiver(token_verifier)
+
+    body_bytes = await request.body()
+    body_str = body_bytes.decode("utf-8")
+
+    try:
+        event = webhook_receiver.receive(body_str, authorization)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    event_id = getattr(event, "id", None)
+    if isinstance(event_id, str) and not _remember_webhook_event_id(event_id):
+        return None
+
+    return event
+
+
+def _resolve_consultation_from_event(event: Any) -> dict[str, Any] | None:
+    room = getattr(event, "room", None)
+    room_data = _build_room_audit_data(room)
+    room_name = None
+    if room_data is not None:
+        room_name = room_data.get("room_name") or room_data.get("name")
+
+    if room_name:
+        consultation = _find_consultation_by_room_name(room_name)
+        if consultation is not None:
+            return consultation
+
+    room_metadata = room_data.get("metadata") if room_data else None
+    if room_metadata is not None:
+        return _find_consultation_by_room_metadata(room_metadata)
+
+    return None
+
+
+def _handle_termination_if_applicable(event: Any, consultation: dict[str, Any] | None) -> None:
+    if consultation is None:
+        return
+
+    if _is_room_termination_event(getattr(event, "event", "unknown")):
+        _mark_consultation_ended_by_system(consultation)
+
+
+def _build_track_labels(track: Any) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    if track is None:
+        return None, None, None
+
+    raw_track_type = getattr(track, "type", None)
+    raw_track_source = getattr(track, "source", None)
+
+    track_type_label = None
+    track_source_label = None
+
+    if isinstance(raw_track_type, int):
+        track_type_label = TRACK_TYPE_LABELS.get(raw_track_type)
+    elif raw_track_type is not None:
+        track_type_label = str(raw_track_type).lower()
+
+    if isinstance(raw_track_source, int):
+        track_source_label = TRACK_SOURCE_LABELS.get(raw_track_source)
+    elif raw_track_source is not None:
+        track_source_label = str(raw_track_source).lower()
+
+    return track_type_label, track_source_label, {
+        "type": raw_track_type,
+        "source": raw_track_source,
+    }
+
+
+def _record_webhook_audit(event: Any, consultation: dict[str, Any] | None) -> None:
+    event_type = getattr(event, "event", "unknown")
+    event_label = f"livekit.{event_type}"
+
+    room = getattr(event, "room", None)
+    room_data = _build_room_audit_data(room)
+    participant = getattr(event, "participant", None)
+    has_participant = _event_field_present(event, "participant", participant)
+    track = getattr(event, "track", None)
+    has_track = _event_field_present(event, "track", track)
+
+    participant_data = None
+    if has_participant and participant is not None:
+        participant_data = _build_participant_audit_data_from_participant(participant)
+
+    track_info = None
+    track_type_label = None
+    track_source_label = None
+    if has_track and track is not None:
+        track_type_label, track_source_label, track_info = _build_track_labels(track)
+
+    if track_type_label or track_source_label:
+        label_parts = []
+        if track_type_label:
+            label_parts.append(track_type_label)
+        if track_source_label:
+            label_parts.append(track_source_label)
+        event_label = f"{event_label} ({': '.join(label_parts)})"
+
+    audit(
+        event_label,
+        consultation_id=consultation["consultation_id"] if consultation else None,
+        room=room_data,
+        participant=participant_data,
+        track=track_info,
+        source="webhook",
     )
 
 
@@ -433,12 +574,11 @@ async def terminate_room(room_name: str) -> None:
                 )
 
             await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
-    except Exception as exc:  # best effort cleanup to avoid blocking consultation closure
-        audit(
-            "consultation.room_termination_failed",
-            room_name=room_name,
-            livekit_api_url=livekit_api_url,
-            error=str(exc),
+    except Exception:
+        logger.exception(
+            "Failed to terminate LiveKit room: room_name=%s livekit_api_url=%s",
+            room_name,
+            livekit_api_url,
         )
 
 
@@ -481,12 +621,11 @@ async def ensure_room_exists_for_consultation(consultation: dict[str, Any]) -> N
                 )
     except HTTPException:
         raise
-    except Exception as exc:
-        audit(
-            "consultation.room_existence_check_failed",
-            consultation_id=consultation["consultation_id"],
-            room_name=room_name,
-            error=str(exc),
+    except Exception:
+        logger.exception(
+            "Failed to verify consultation room state: consultation_id=%s room_name=%s",
+            consultation["consultation_id"],
+            room_name,
         )
         raise HTTPException(
             status_code=500,
@@ -583,7 +722,7 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
             await lkapi.room.create_room(
                 api.CreateRoomRequest(
                     name=room_name,
-                    departure_timeout=CONSULTATION_TTL_SECONDS,
+                    departure_timeout=DEPARTURE_TIMEOUT,
                     metadata=room_metadata,
                 )
             )
@@ -686,124 +825,18 @@ async def end_consultation(
     return _build_consultation_ended_response(consultation)
 
 
-# @app.post("/api/webhooks")
-# async def livekit_webhook(request: Request) -> dict[str, str]:
-#     body = await request.body()
-#     audit(
-#         "livekit.webhook.received",
-#         content_type=request.headers.get("content-type"),
-#         body_size=len(body),
-#     )
-#     return {"status": "received"}
-
-
 @app.post("/api/webhooks")
 async def livekit_webhook(
     request: Request,
     authorization: str = Header(None),
 ) -> dict[str, str]:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization Header")
+    event = await _verify_and_parse_webhook(request, authorization)
+    if event is None:
+        return {"status": "duplicate ignored"}
 
-    api_key, api_secret = require_livekit_credentials()
-    token_verifier = api.TokenVerifier(api_key=api_key, api_secret=api_secret)
-    webhook_receiver = api.WebhookReceiver(token_verifier)
-
-    body_bytes = await request.body()
-    body_str = body_bytes.decode("utf-8")
-
-    try:
-        event = webhook_receiver.receive(body_str, authorization)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
-    event_id = getattr(event, "id", None)
-    if event_id is not None:
-        if event_id in processed_webhook_event_ids:
-            return {"status": "duplicate ignored"}
-        processed_webhook_event_ids.add(event_id)
-
-    event_type = getattr(event, "event", "unknown")
-    room = getattr(event, "room", None)
-    room_data = build_room_audit_data(room)
-    room_name = None
-    if room_data is not None:
-        room_name = room_data.get("room_name") or room_data.get("name")
-    room_sid = room_data.get("room_id") if room_data else None
-    room_metadata = room_data.get("metadata") if room_data else None
-    
-    consultation = None
-    if room_name:
-        consultation = find_consultation_by_room_name(room_name)
-    if consultation is None and room_metadata is not None:
-        consultation = find_consultation_by_room_metadata(room_metadata)
-
-    consultation_id = consultation["consultation_id"] if consultation else None
-
-    if _is_room_termination_event(event_type) and consultation is not None:
-        _mark_consultation_ended_by_system(consultation)
-
-    participant = getattr(event, "participant", None)
-    participant_data = None
-    has_participant = _event_field_present(event, "participant", participant)
-
-    if has_participant and participant is not None:
-        participant_data = build_participant_audit_data(participant)
-
-    track = getattr(event, "track", None)
-    track_info = None
-    track_type_label = None
-    track_source_label = None
-
-    has_track = _event_field_present(event, "track", track)
-
-    if has_track and track is not None:
-        raw_track_type = getattr(track, "type", None)
-        raw_track_source = getattr(track, "source", None)
-
-        track_type_label = None
-        track_source_label = None
-        if isinstance(raw_track_type, int):
-            track_type_label = {
-                0: "audio",
-                1: "video",
-            }.get(raw_track_type)
-        elif raw_track_type is not None:
-            track_type_label = str(raw_track_type).lower()
-
-        if isinstance(raw_track_source, int):
-            track_source_label = {
-                0: "unknown",
-                1: "camera",
-                2: "microphone",
-                3: "screen_share",
-                4: "screen_share_audio",
-            }.get(raw_track_source)
-        elif raw_track_source is not None:
-            track_source_label = str(raw_track_source).lower()
-
-        track_info = {
-            "type": raw_track_type,
-            "source": raw_track_source,
-        }
-
-    event_label = f"livekit.{event_type}"
-    if track_type_label or track_source_label:
-        label_parts = []
-        if track_type_label:
-            label_parts.append(track_type_label)
-        if track_source_label:
-            label_parts.append(track_source_label)
-        event_label = f"{event_label} ({': '.join(label_parts)})"
-
-    audit(
-        event_label,
-        consultation_id=consultation_id,
-        room=room_data,
-        participant=participant_data,
-        track=track_info,
-        source="webhook",
-    )
+    consultation = _resolve_consultation_from_event(event)
+    _handle_termination_if_applicable(event, consultation)
+    _record_webhook_audit(event, consultation)
 
     return {"status": "received"}
 
