@@ -24,9 +24,10 @@ Before you begin, ensure you have the following installed on your system:
 
 ```text
 sample-livekit-workflow/
-├── backend/       # FastAPI server, token generation, webhook handling
-├── frontend/      # React/Vite application UI
-├── livekit/       # LiveKit server configuration (.yaml)
+├── backend/         # FastAPI server, token generation, webhook handling
+├── frontend/        # React/Vite application UI
+├── livekit/         # LiveKit server configuration (.yaml)
+├── start-dev.ps1    # Launches all three services at once
 └── README.md
 ```
 
@@ -67,6 +68,16 @@ npm install
 # Start the frontend app
 npm run dev
 ```
+
+### ⚡ One-Command Launch
+
+A `start-dev.ps1` script is included in the repo root to launch all three services (LiveKit server, backend, and frontend) at once, each in its own PowerShell window.
+
+```powershell
+.\start-dev.ps1
+```
+
+This assumes dependencies have already been installed at least once (`pip install -r requirements.txt` and `npm install`), and that a `venv` exists in `backend/`.
 
 ---
 
