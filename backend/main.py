@@ -575,6 +575,11 @@ async def terminate_room(room_name: str) -> None:
 
             await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
     except Exception:
+        audit(
+            "consultation.room_termination_failed",
+            room_name=room_name,
+            livekit_api_url=livekit_api_url,
+        )
         logger.exception(
             "Failed to terminate LiveKit room: room_name=%s livekit_api_url=%s",
             room_name,
@@ -622,6 +627,11 @@ async def ensure_room_exists_for_consultation(consultation: dict[str, Any]) -> N
     except HTTPException:
         raise
     except Exception:
+        audit(
+            "consultation.room_existence_check_failed",
+            consultation_id=consultation["consultation_id"],
+            room_name=room_name,
+        )
         logger.exception(
             "Failed to verify consultation room state: consultation_id=%s room_name=%s",
             consultation["consultation_id"],
