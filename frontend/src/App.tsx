@@ -1,10 +1,11 @@
-﻿import { useEffect, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import {
   LiveKitRoom,
   VideoConference,
   RoomAudioRenderer,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
+import { ExternalE2EEKeyProvider, Room } from 'livekit-client';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -27,6 +28,7 @@ type JoinState = {
   participantName: string;
   role: Role;
   expiresInSeconds: number;
+  e2eeKey: string;
 };
 
 type ApiError = Error & {
@@ -428,6 +430,7 @@ function useConsultation(): ConsultationController {
         participant_name: string;
         role: Role;
         expires_in_seconds: number;
+        e2ee_key: string;
       }>(`${API_URL}/api/consultations/${encodeURIComponent(id)}/token`, {
         method: 'POST',
         body: JSON.stringify({ participant_name: participantName, role }),
@@ -439,6 +442,7 @@ function useConsultation(): ConsultationController {
         participantName: tokenResponse.participant_name,
         role: tokenResponse.role,
         expiresInSeconds: tokenResponse.expires_in_seconds,
+        e2eeKey: tokenResponse.e2ee_key,
       });
     } catch (e) {
       setErrorNotice(createErrorNotice(e, 'Joining the consultation'));
@@ -575,6 +579,52 @@ function JoinConsultationPanel({
 }
 
 function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewProps) {
+  const { room, keyProvider } = useMemo(() => {
+    const keyProvider = new ExternalE2EEKeyProvider();
+    const worker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
+      type: 'module',
+    });
+
+    return {
+      keyProvider,
+      room: new Room({
+        encryption: {
+          keyProvider,
+          worker,
+        },
+      }),
+    };
+  }, []);
+
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const connectRoom = async () => {
+      setConnectionError(null);
+      await keyProvider.setKey(joinState.e2eeKey);
+      await room.setE2EEEnabled(true);
+
+      if (cancelled) {
+        return;
+      }
+
+      await room.connect(LIVEKIT_URL, joinState.token);
+    };
+
+    void connectRoom().catch((error) => {
+      if (!cancelled) {
+        setConnectionError(error instanceof Error ? error.message : 'Unable to connect to the consultation room.');
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      room.disconnect();
+    };
+  }, [joinState.e2eeKey, joinState.token, keyProvider, room]);
+
   return (
     <div className="call-shell">
       <div className="call-strip">
@@ -586,14 +636,24 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
           {joinState.role === 'doctor' && (
             <button type="button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
           )}
-          <button type="button" onClick={onLeaveCall}>Leave test</button>
+          <button type="button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
         </div>
       </div>
+      {connectionError && (
+        <div className="notice-card notice-card--info" role="status" aria-live="polite">
+          <div className="notice-copy">
+            <p className="notice-title">Secure connection failed</p>
+            <p className="notice-message">{connectionError}</p>
+            <p className="notice-suggestion">Leave the call, then try joining again with a fresh token and shared key.</p>
+          </div>
+        </div>
+      )}
       <LiveKitRoom
+        room={room}
+        serverUrl={undefined}
+        token={undefined}
         video={joinState.role !== 'observer'}
         audio={joinState.role !== 'observer'}
-        token={joinState.token}
-        serverUrl={LIVEKIT_URL}
         onDisconnected={onLeaveCall}
         data-lk-theme="default"
         style={{ height: 'calc(100dvh - 56px)' }}

@@ -32,6 +32,11 @@ TRACK_SOURCE_LABELS = {
     3: "screen_share",
     4: "screen_share_audio",
 }
+TRACK_ENCRYPTION_LABELS = {
+    0: "none",
+    1: "gcm",
+    2: "custom",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,7 @@ class TokenResponse(BaseModel):
     participant_name: str
     role: Role
     expires_in_seconds: int
+    e2ee_key: str
 
 
 class EndConsultationRequest(BaseModel):
@@ -414,9 +420,11 @@ def _build_track_labels(track: Any) -> tuple[str | None, str | None, dict[str, A
 
     raw_track_type = getattr(track, "type", None)
     raw_track_source = getattr(track, "source", None)
+    raw_encryption = getattr(track, "encryption", None)
 
     track_type_label = None
     track_source_label = None
+    encryption_label = None
 
     if isinstance(raw_track_type, int):
         track_type_label = TRACK_TYPE_LABELS.get(raw_track_type)
@@ -428,9 +436,15 @@ def _build_track_labels(track: Any) -> tuple[str | None, str | None, dict[str, A
     elif raw_track_source is not None:
         track_source_label = str(raw_track_source).lower()
 
-    return track_type_label, track_source_label, {
-        "type": raw_track_type,
-        "source": raw_track_source,
+    if isinstance(raw_encryption, int):
+        encryption_label = TRACK_ENCRYPTION_LABELS.get(raw_encryption)
+    elif raw_encryption is not None:
+        encryption_label = str(raw_encryption).lower()
+
+    return track_type_label, track_source_label,{
+        "type": track_type_label,
+        "source":  track_source_label,
+        "encryption": encryption_label,
     }
 
 
@@ -696,6 +710,7 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
 
     consultation_id = secrets.token_urlsafe(12)
     room_name = f"tachafy-{consultation_id}"
+    e2ee_key = secrets.token_urlsafe(32)
     expires_at = utc_now() + timedelta(minutes=CONSULTATION_TTL_MINUTES)
     room_metadata = json.dumps(
         {
@@ -711,6 +726,7 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         "room_name": room_name,
         "doctor_name": payload.doctor_name,
         "patient_name": payload.patient_name,
+        "e2ee_key": e2ee_key,
         "created_at": utc_now(),
         "expires_at": expires_at,
         "status": "active",
@@ -798,6 +814,7 @@ async def create_consultation_token(
         participant_name=payload.participant_name,
         role=payload.role,
         expires_in_seconds=TOKEN_TTL_SECONDS,
+        e2ee_key=consultation["e2ee_key"],
     )
 
 
