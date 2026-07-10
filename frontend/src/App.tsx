@@ -477,6 +477,15 @@ function useConsultation(): ConsultationController {
   };
 }
 
+function BrandBar({ dark = false }: { dark?: boolean }) {
+  return (
+    <div className={dark ? 'brand-bar brand-bar--dark' : 'brand-bar'}>
+      <div className="wordmark">tachafy</div>
+      <span className="wordmark-tag">Teleconsultation</span>
+    </div>
+  );
+}
+
 function NoticeCard({ notice, kind, onDismiss }: NoticeCardProps) {
   if (kind === 'error') {
     return (
@@ -627,16 +636,17 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
 
   return (
     <div className="call-shell">
+      <BrandBar dark />
       <div className="call-strip">
         <div>
           <strong>{joinState.participantName}</strong>
           <span>{joinState.role} · {joinState.roomName} · token TTL {Math.round(joinState.expiresInSeconds / 60)} min</span>
         </div>
-        <div>
+        <div className="call-strip-actions">
           {joinState.role === 'doctor' && (
-            <button type="button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
+            <button type="button" className="end-button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
           )}
-          <button type="button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
+          <button type="button" className="leave-button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
         </div>
       </div>
       {connectionError && (
@@ -656,7 +666,7 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
         audio={joinState.role !== 'observer'}
         onDisconnected={onLeaveCall}
         data-lk-theme="default"
-        style={{ height: 'calc(100dvh - 56px)' }}
+        style={{ height: 'calc(100dvh - 116px)' }}
       >
         <VideoConference />
         <RoomAudioRenderer />
@@ -697,6 +707,7 @@ function App() {
 
   return (
     <main className="teleconsultation-console">
+      <BrandBar />
       <section className="intro-panel">
         <p className="eyebrow">Tachafy LiveKit MVP</p>
         <h1>Teleconsultation access console</h1>
