@@ -1,8 +1,9 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LiveKitRoom,
   VideoConference,
   RoomAudioRenderer,
+  PreJoin,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { ExternalE2EEKeyProvider, Room } from 'livekit-client';
@@ -23,12 +24,14 @@ type Consultation = {
 };
 
 type JoinState = {
-  token: string;
-  roomName: string;
+  consultationId: string;
+  token: string | null;
+  roomName: string | null;
   participantName: string;
   role: Role;
-  expiresInSeconds: number;
-  e2eeKey: string;
+  expiresInSeconds: number | null;
+  e2eeKey: string | null;
+  tokenIssuedAt: string | null;
 };
 
 type ApiError = Error & {
@@ -143,7 +146,12 @@ const createErrorNotice = (error: unknown, actionLabel: string): ErrorNotice => 
 type NoticeCardProps = {
   notice: ErrorNotice;
   kind: 'error' | 'info';
-  onDismiss: () => void;
+  onDismiss?: () => void;
+  action?: {
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+  };
 };
 
 type CreateConsultationPanelProps = {
@@ -159,7 +167,6 @@ type JoinConsultationPanelProps = {
   consultationId: string;
   participantName: string;
   role: Role;
-  busy: boolean;
   onConsultationIdChange: (value: string) => void;
   onParticipantNameChange: (value: string) => void;
   onRoleChange: (value: Role) => void;
@@ -168,9 +175,13 @@ type JoinConsultationPanelProps = {
 
 type CallViewProps = {
   joinState: JoinState;
+  consultationExpiresAt: string | null;
   busy: boolean;
+  onRequestJoinToken: (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => Promise<void>;
   onEndConsultation: () => void;
   onLeaveCall: () => void;
+  onReturnToJoinForm: () => void;
+  onStageChange: (stage: 'preview' | 'connecting' | 'call' | null) => void;
 };
 
 type ConsultationController = {
@@ -185,6 +196,7 @@ type ConsultationController = {
   errorNotice: ErrorNotice | null;
   sessionNotice: ErrorNotice | null;
   busy: boolean;
+  setCallStage: (stage: 'preview' | 'connecting' | 'call' | null) => void;
   setDoctorName: (value: string) => void;
   setPatientName: (value: string) => void;
   setParticipantName: (value: string) => void;
@@ -193,9 +205,61 @@ type ConsultationController = {
   setErrorNotice: (value: ErrorNotice | null) => void;
   setSessionNotice: (value: ErrorNotice | null) => void;
   createConsultation: () => Promise<void>;
+  beginJoinSession: () => void;
   joinConsultation: () => Promise<void>;
   endConsultation: () => Promise<void>;
   leaveCall: () => void;
+  returnToJoinForm: () => void;
+};
+
+const formatCountdown = (totalSeconds: number): string => {
+  const safeSeconds = Math.max(0, totalSeconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = safeSeconds % 60;
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+};
+
+const isTokenConnectionError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const livekitError = error as {
+    name?: unknown;
+    reasonName?: unknown;
+    status?: unknown;
+  };
+
+  return (
+    livekitError.name === 'ConnectionError'
+    && livekitError.reasonName === 'NotAllowed'
+    && (livekitError.status === 401 || livekitError.status === 403)
+  );
+};
+
+const buildConsultationEndedNotice = (stage: 'preview' | 'connecting' | 'call' | null): ErrorNotice => {
+  if (stage === 'call') {
+    return {
+      title: 'Consultation expired during the call',
+      message: 'This consultation reached its scheduled end time while the room was active.',
+      suggestion: 'Create a new consultation to continue.',
+    };
+  }
+
+  if (stage === 'connecting') {
+    return {
+      title: 'Consultation expired before you connected',
+      message: 'This consultation\'s time window ended while you were connecting to the room.',
+      suggestion: 'Create a new consultation to continue.',
+    };
+  }
+
+  return {
+    title: 'Consultation expired during setup',
+    message: 'This consultation\'s time window ended while you were setting up your camera and microphone.',
+    suggestion: 'Create a new consultation to continue.',
+  };
 };
 
 function useConsultation(): ConsultationController {
@@ -206,12 +270,13 @@ function useConsultation(): ConsultationController {
   const [consultationId, setConsultationId] = useState('');
   const [consultation, setConsultation] = useState<Consultation | null>(null);
   const [joinState, setJoinState] = useState<JoinState | null>(null);
+  const [callStage, setCallStage] = useState<'preview' | 'connecting' | 'call' | null>(null);
   const [status, setStatus] = useState('Create a consultation, then join it from one or two browser windows.');
   const [errorNotice, setErrorNotice] = useState<ErrorNotice | null>(null);
   const [sessionNotice, setSessionNotice] = useState<ErrorNotice | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const markConsultationEnded = (endedAt: string, notice: ErrorNotice) => {
+  const markConsultationEnded = useCallback((endedAt: string, notice: ErrorNotice) => {
     setConsultation((current) => {
       if (!current || current.status === 'ended') {
         return current;
@@ -226,18 +291,52 @@ function useConsultation(): ConsultationController {
 
     setSessionNotice(notice);
     setStatus(notice.message);
+    setCallStage(null);
 
-    if (joinState !== null) {
-      setJoinState(null);
+    setJoinState((current) => (current === null ? current : null));
+  }, []);
+
+  const beginJoinSession = useCallback(() => {
+    const id = consultationId.trim();
+
+    if (!id) {
+      setErrorNotice({
+        title: 'Consultation ID required',
+        message: 'Paste a consultation ID before continuing to device check.',
+        suggestion: 'Use the ID from the Create consultation panel.',
+      });
+      return;
     }
-  };
 
-  const leaveCall = () => {
+    setErrorNotice(null);
+    setSessionNotice(null);
+    setCallStage(null);
+    setJoinState({
+      consultationId: id,
+      token: null,
+      roomName: null,
+      participantName,
+      role,
+      expiresInSeconds: null,
+      e2eeKey: null,
+      tokenIssuedAt: null,
+    });
+    setStatus('Device check opened. Pick your camera and microphone before requesting a token.');
+  }, [consultationId, participantName, role]);
+
+  const leaveCall = useCallback(() => {
     setJoinState(null);
+    setCallStage(null);
     setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
-  };
+  }, []);
 
-  const requestJson = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+  const returnToJoinForm = useCallback(() => {
+    setJoinState(null);
+    setCallStage(null);
+    setStatus('Join the consultation again from the form.');
+  }, []);
+
+  const requestJson = useCallback(async <T,>(url: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(url, {
       headers: { 'Content-Type': 'application/json' },
       ...init,
@@ -248,7 +347,7 @@ function useConsultation(): ConsultationController {
     }
 
     return response.json() as Promise<T>;
-  };
+  }, []);
 
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
@@ -262,8 +361,7 @@ function useConsultation(): ConsultationController {
 
     const expireConsultation = () => {
       markConsultationEnded(consultation.expires_at, {
-        title: 'Consultation expired',
-        message: 'This consultation reached its scheduled end time.',
+        ...buildConsultationEndedNotice(callStage),
         suggestion: 'Create a new consultation to continue.',
       });
     };
@@ -276,7 +374,7 @@ function useConsultation(): ConsultationController {
 
     const timeoutId = window.setTimeout(expireConsultation, timeUntilExpiry);
     return () => window.clearTimeout(timeoutId);
-  }, [consultation]);
+  }, [consultation, callStage]);
 
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
@@ -315,15 +413,16 @@ function useConsultation(): ConsultationController {
         if (latestMatchingEvent.event_type === 'consultation.ended') {
           markConsultationEnded(latestMatchingEvent.timestamp, {
             title: 'Consultation ended elsewhere',
-            message: `This consultation was ended by ${latestMatchingEvent.ended_by ?? 'another window'}.`,
+            message: callStage === 'call'
+              ? `This consultation was ended by ${latestMatchingEvent.ended_by ?? 'another window'} while the call was active.`
+              : `This consultation was ended by ${latestMatchingEvent.ended_by ?? 'another window'} while you were still setting up.`,
             suggestion: 'Request a new consultation ID if you need to rejoin.',
           });
           return;
         }
 
         markConsultationEnded(consultation.expires_at, {
-          title: 'Consultation expired',
-          message: 'This consultation expired in the backend.',
+          ...buildConsultationEndedNotice(callStage),
           suggestion: 'Create a new consultation to continue.',
         });
       } catch {
@@ -340,9 +439,9 @@ function useConsultation(): ConsultationController {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [consultation?.consultation_id, consultation?.expires_at, consultation?.status, joinState]);
+  }, [consultation?.consultation_id, consultation?.expires_at, consultation?.status, callStage, joinState]);
 
-  const endConsultation = async () => {
+  const endConsultation = useCallback(async () => {
     if (!joinState || !consultationId.trim()) {
       return;
     }
@@ -384,9 +483,9 @@ function useConsultation(): ConsultationController {
     } finally {
       setBusy(false);
     }
-  };
+  }, [consultationId, joinState, requestJson]);
 
-  const createConsultation = async () => {
+  const createConsultation = useCallback(async () => {
     setBusy(true);
     setErrorNotice(null);
     setSessionNotice(null);
@@ -405,23 +504,22 @@ function useConsultation(): ConsultationController {
     } finally {
       setBusy(false);
     }
-  };
+  }, [doctorName, patientName, requestJson]);
 
-  const joinConsultation = async () => {
-    const id = consultationId.trim();
+  const joinConsultation = useCallback(async (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => {
+    const joinDetails = request ?? joinState;
+
+    if (!joinDetails) {
+      return;
+    }
+
+    const id = joinDetails.consultationId.trim();
 
     if (!id) {
-      setErrorNotice({
-        title: 'Consultation ID required',
-        message: 'Paste a consultation ID before trying to issue a token.',
-        suggestion: 'Use the ID from the Create consultation panel.',
-      });
       return;
     }
 
     setBusy(true);
-    setErrorNotice(null);
-    setSessionNotice(null);
 
     try {
       const tokenResponse = await requestJson<{
@@ -433,23 +531,25 @@ function useConsultation(): ConsultationController {
         e2ee_key: string;
       }>(`${API_URL}/api/consultations/${encodeURIComponent(id)}/token`, {
         method: 'POST',
-        body: JSON.stringify({ participant_name: participantName, role }),
+        body: JSON.stringify({ participant_name: joinDetails.participantName, role: joinDetails.role }),
       });
 
       setJoinState({
+        consultationId: id,
         token: tokenResponse.token,
         roomName: tokenResponse.room_name,
         participantName: tokenResponse.participant_name,
         role: tokenResponse.role,
         expiresInSeconds: tokenResponse.expires_in_seconds,
         e2eeKey: tokenResponse.e2ee_key,
+        tokenIssuedAt: new Date().toISOString(),
       });
     } catch (e) {
-      setErrorNotice(createErrorNotice(e, 'Joining the consultation'));
+      throw e;
     } finally {
       setBusy(false);
     }
-  };
+  }, [joinState, requestJson]);
 
   return {
     doctorName,
@@ -463,6 +563,7 @@ function useConsultation(): ConsultationController {
     errorNotice,
     sessionNotice,
     busy,
+    setCallStage,
     setDoctorName,
     setPatientName,
     setParticipantName,
@@ -471,9 +572,11 @@ function useConsultation(): ConsultationController {
     setErrorNotice,
     setSessionNotice,
     createConsultation,
+    beginJoinSession,
     joinConsultation,
     endConsultation,
     leaveCall,
+    returnToJoinForm,
   };
 }
 
@@ -486,7 +589,7 @@ function BrandBar({ dark = false }: { dark?: boolean }) {
   );
 }
 
-function NoticeCard({ notice, kind, onDismiss }: NoticeCardProps) {
+function NoticeCard({ notice, kind, onDismiss, action }: NoticeCardProps) {
   if (kind === 'error') {
     return (
       <div className="notice-card" role="alert" aria-live="polite">
@@ -496,12 +599,19 @@ function NoticeCard({ notice, kind, onDismiss }: NoticeCardProps) {
           <p className="notice-suggestion">{notice.suggestion}</p>
         </div>
         <div className="notice-actions">
+          {action && (
+            <button type="button" className="ghost-button" onClick={action.onClick} disabled={action.disabled}>
+              {action.label}
+            </button>
+          )}
           {typeof notice.status === 'number' && (
             <span className="notice-badge">HTTP {notice.status}</span>
           )}
-          <button type="button" className="ghost-button" onClick={onDismiss}>
-            Dismiss
-          </button>
+          {onDismiss && (
+            <button type="button" className="ghost-button" onClick={onDismiss}>
+              Dismiss
+            </button>
+          )}
         </div>
       </div>
     );
@@ -515,9 +625,16 @@ function NoticeCard({ notice, kind, onDismiss }: NoticeCardProps) {
         <p className="notice-suggestion">{notice.suggestion}</p>
       </div>
       <div className="notice-actions">
-        <button type="button" className="ghost-button" onClick={onDismiss}>
-          Dismiss
-        </button>
+        {action && (
+          <button type="button" className="ghost-button" onClick={action.onClick} disabled={action.disabled}>
+            {action.label}
+          </button>
+        )}
+        {onDismiss && (
+          <button type="button" className="ghost-button" onClick={onDismiss}>
+            Dismiss
+          </button>
+        )}
       </div>
     </div>
   );
@@ -554,7 +671,6 @@ function JoinConsultationPanel({
   consultationId,
   participantName,
   role,
-  busy,
   onConsultationIdChange,
   onParticipantNameChange,
   onRoleChange,
@@ -582,12 +698,29 @@ function JoinConsultationPanel({
           <option value="observer">Observer: subscribe only</option>
         </select>
       </label>
-      <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Issue token and join'}</button>
+      <button type="submit">Continue to device check</button>
     </form>
   );
 }
 
-function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewProps) {
+type DeviceChoices = {
+  username: string;
+  videoEnabled: boolean;
+  audioEnabled: boolean;
+  videoDeviceId: string;
+  audioDeviceId: string;
+};
+
+function CallView({
+  joinState,
+  consultationExpiresAt,
+  busy,
+  onRequestJoinToken,
+  onEndConsultation,
+  onLeaveCall,
+    onReturnToJoinForm,
+  onStageChange,
+}: CallViewProps) {
   const { room, keyProvider } = useMemo(() => {
     const keyProvider = new ExternalE2EEKeyProvider();
     const worker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
@@ -605,26 +738,136 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
     };
   }, []);
 
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const skipPreview = joinState.role === 'observer';
+  const [stage, setStage] = useState<'preview' | 'connecting' | 'call'>(skipPreview ? 'connecting' : 'preview');
+  const [deviceChoices, setDeviceChoices] = useState<DeviceChoices | null>(null);
+  const [connectionNotice, setConnectionNotice] = useState<ErrorNotice | null>(null);
+  const [connectionAction, setConnectionAction] = useState<null | (() => void)>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [tokenRequestPending, setTokenRequestPending] = useState(false);
+  const observerTokenRequested = useRef(false);
+  const readyToConnect = skipPreview || deviceChoices !== null;
+  const onRequestJoinTokenRef = useRef(onRequestJoinToken);
 
   useEffect(() => {
+    onRequestJoinTokenRef.current = onRequestJoinToken;
+  }, [onRequestJoinToken]);
+
+  useEffect(() => {
+    onStageChange(stage);
+  }, [onStageChange, stage]);
+
+  useEffect(() => () => onStageChange(null), [onStageChange]);
+
+  useEffect(() => {
+    if (!joinState.token || !joinState.expiresInSeconds || !joinState.tokenIssuedAt) {
+      return;
+    }
+
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [joinState.expiresInSeconds, joinState.token, joinState.tokenIssuedAt]);
+
+  const requestFreshToken = useCallback(async (request: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => {
+    setConnectionNotice(null);
+    setConnectionAction(null);
+    setTokenRequestPending(true);
+
+    try {
+      await onRequestJoinTokenRef.current(request);
+    } catch (error) {
+      const notice = createErrorNotice(error, 'Joining the consultation');
+      const apiStatus = error instanceof Error && 'status' in error
+        ? (error as ApiError).status
+        : undefined;
+
+      setConnectionNotice(notice);
+      setConnectionAction(apiStatus === 404 || apiStatus === 409 || apiStatus === 410 || apiStatus === 403
+        ? () => onReturnToJoinForm
+        : () => () => {
+            setStage('connecting');
+            void requestFreshToken(request);
+          });
+      setStage('preview');
+    } finally {
+      setTokenRequestPending(false);
+    }
+  }, [onReturnToJoinForm]);
+
+  useEffect(() => {
+    if (!skipPreview || observerTokenRequested.current || joinState.token || tokenRequestPending) {
+      return;
+    }
+
+    observerTokenRequested.current = true;
+    void requestFreshToken({
+      consultationId: joinState.consultationId,
+      participantName: joinState.participantName,
+      role: joinState.role,
+    });
+  }, [joinState.consultationId, joinState.participantName, joinState.role, joinState.token, requestFreshToken, skipPreview, tokenRequestPending]);
+
+  useEffect(() => {
+    const token = joinState.token;
+    const e2eeKey = joinState.e2eeKey;
+
+    if (!readyToConnect || stage === 'preview' || !token || !e2eeKey) {
+      return;
+    }
+
     let cancelled = false;
 
     const connectRoom = async () => {
-      setConnectionError(null);
-      await keyProvider.setKey(joinState.e2eeKey);
+      setConnectionNotice(null);
+      setConnectionAction(null);
+      await keyProvider.setKey(e2eeKey);
       await room.setE2EEEnabled(true);
 
       if (cancelled) {
         return;
       }
 
-      await room.connect(LIVEKIT_URL, joinState.token);
+      await room.connect(LIVEKIT_URL, token);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (deviceChoices) {
+        await room.localParticipant.setCameraEnabled(deviceChoices.videoEnabled, { deviceId: deviceChoices.videoDeviceId });
+        await room.localParticipant.setMicrophoneEnabled(deviceChoices.audioEnabled, { deviceId: deviceChoices.audioDeviceId });
+      }
+
+      if (!cancelled) {
+        setStage('call');
+      }
     };
 
     void connectRoom().catch((error) => {
       if (!cancelled) {
-        setConnectionError(error instanceof Error ? error.message : 'Unable to connect to the consultation room.');
+        if (isTokenConnectionError(error)) {
+          setConnectionNotice({
+            title: 'Your session timed out before connecting',
+            message: 'LiveKit rejected the token before the room joined.',
+            suggestion: 'Request a fresh token and retry the connection.',
+          });
+          setConnectionAction(() => () => {
+            setStage('connecting');
+            void requestFreshToken({
+              consultationId: joinState.consultationId,
+              participantName: joinState.participantName,
+              role: joinState.role,
+            });
+          });
+        } else {
+          setConnectionNotice(createErrorNotice(error, 'Connecting to the consultation room'));
+          setConnectionAction(() => onReturnToJoinForm);
+        }
+
+        setStage('preview');
+        room.disconnect();
       }
     });
 
@@ -632,7 +875,95 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
       cancelled = true;
       room.disconnect();
     };
-  }, [joinState.e2eeKey, joinState.token, keyProvider, room]);
+  }, [
+    readyToConnect,
+    skipPreview,
+    deviceChoices,
+    joinState.e2eeKey,
+    joinState.token,
+    joinState.consultationId,
+    joinState.participantName,
+    joinState.role,
+    keyProvider,
+    requestFreshToken,
+    onReturnToJoinForm,
+    room,
+  ]);
+
+  const tokenExpiresAtMs = joinState.tokenIssuedAt && joinState.expiresInSeconds
+    ? Date.parse(joinState.tokenIssuedAt) + joinState.expiresInSeconds * 1000
+    : null;
+
+  const tokenCountdown = tokenExpiresAtMs !== null
+    ? formatCountdown(Math.ceil((tokenExpiresAtMs - now) / 1000))
+    : null;
+
+  const consultationCountdown = consultationExpiresAt
+    ? formatCountdown(Math.ceil((Date.parse(consultationExpiresAt) - now) / 1000))
+    : null;
+
+  if (stage === 'preview') {
+    return (
+      <div className="call-shell">
+        <BrandBar dark />
+        <div className="prejoin-stage">
+          <p className="prejoin-heading">Check your camera and microphone</p>
+          <p className="prejoin-subheading">Everything here stays on this device until you join.</p>
+          {consultationCountdown && (
+            <p className="prejoin-countdown">This consultation closes in {consultationCountdown}.</p>
+          )}
+          <div data-lk-theme="default" className="prejoin-widget">
+            <PreJoin
+              defaults={{ username: joinState.participantName }}
+              joinLabel="Join consultation"
+              micLabel="Microphone"
+              camLabel="Camera"
+              userLabel="Display name"
+              persistUserChoices
+              onSubmit={(choices) => {
+                setConnectionNotice(null);
+                setConnectionAction(null);
+                setDeviceChoices({
+                  username: choices.username,
+                  videoEnabled: choices.videoEnabled,
+                  audioEnabled: choices.audioEnabled,
+                  videoDeviceId: choices.videoDeviceId,
+                  audioDeviceId: choices.audioDeviceId,
+                });
+                setTokenRequestPending(true);
+                setStage('connecting');
+                void requestFreshToken({
+                  consultationId: joinState.consultationId,
+                  participantName: choices.username,
+                  role: joinState.role,
+                });
+              }}
+              onError={(error) => setConnectionNotice(createErrorNotice(error, 'Opening the device check'))}
+            />
+          </div>
+          {connectionNotice && (
+            <NoticeCard
+              notice={connectionNotice}
+              kind="info"
+              onDismiss={connectionAction ? undefined : () => {
+                setConnectionNotice(null);
+                setConnectionAction(null);
+              }}
+              action={connectionAction
+                ? {
+                    label: connectionNotice.title === 'Consultation not found' || connectionNotice.title === 'Consultation no longer available' || connectionNotice.title === 'Access denied'
+                      ? 'Back to join form'
+                      : 'Retry with a fresh token',
+                    onClick: connectionAction,
+                    disabled: busy,
+                  }
+                : undefined}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="call-shell">
@@ -640,7 +971,19 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
       <div className="call-strip">
         <div>
           <strong>{joinState.participantName}</strong>
-          <span>{joinState.role} · {joinState.roomName} · token TTL {Math.round(joinState.expiresInSeconds / 60)} min</span>
+          <span>
+            {joinState.role}
+            {' '}
+            ·
+            {' '}
+            {joinState.roomName ?? 'Preparing room'}
+            {tokenCountdown && (
+              <>
+                {' '}
+                · token expires in {tokenCountdown}
+              </>
+            )}
+          </span>
         </div>
         <div className="call-strip-actions">
           {joinState.role === 'doctor' && (
@@ -649,28 +992,48 @@ function CallView({ joinState, busy, onEndConsultation, onLeaveCall }: CallViewP
           <button type="button" className="leave-button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
         </div>
       </div>
-      {connectionError && (
-        <div className="notice-card notice-card--info" role="status" aria-live="polite">
-          <div className="notice-copy">
-            <p className="notice-title">Secure connection failed</p>
-            <p className="notice-message">{connectionError}</p>
-            <p className="notice-suggestion">Leave the call, then try joining again with a fresh token and shared key.</p>
-          </div>
-        </div>
+      {connectionNotice && (
+        <NoticeCard
+          notice={connectionNotice}
+          kind="info"
+          onDismiss={connectionAction ? undefined : () => {
+            setConnectionNotice(null);
+            setConnectionAction(null);
+          }}
+          action={connectionAction
+            ? {
+                label: 'Retry with a fresh token',
+                onClick: connectionAction,
+                disabled: busy,
+              }
+            : undefined}
+        />
       )}
-      <LiveKitRoom
-        room={room}
-        serverUrl={undefined}
-        token={undefined}
-        video={joinState.role !== 'observer'}
-        audio={joinState.role !== 'observer'}
-        onDisconnected={onLeaveCall}
-        data-lk-theme="default"
-        style={{ height: 'calc(100dvh - 116px)' }}
-      >
-        <VideoConference />
-        <RoomAudioRenderer />
-      </LiveKitRoom>
+      <div className="call-stage" style={{ height: 'calc(100dvh - 116px)' }}>
+        {(stage === 'connecting' || tokenRequestPending) && !connectionNotice && (
+          <div className="connecting-overlay" role="status" aria-live="polite">
+            <span className="spinner" aria-hidden="true" />
+            <p>
+              {tokenCountdown
+                ? `Connecting to the secure room. Token expires in ${tokenCountdown}.`
+                : 'Connecting to the secure room…'}
+            </p>
+          </div>
+        )}
+        <LiveKitRoom
+          room={room}
+          serverUrl={undefined}
+          token={undefined}
+          video={false}
+          audio={false}
+          onDisconnected={onLeaveCall}
+          data-lk-theme="default"
+          style={{ height: '100%' }}
+        >
+          <VideoConference />
+          <RoomAudioRenderer />
+        </LiveKitRoom>
+      </div>
     </div>
   );
 }
@@ -688,6 +1051,7 @@ function App() {
     errorNotice,
     sessionNotice,
     busy,
+    setCallStage,
     setDoctorName,
     setPatientName,
     setParticipantName,
@@ -696,13 +1060,25 @@ function App() {
     setErrorNotice,
     setSessionNotice,
     createConsultation,
+    beginJoinSession,
     joinConsultation,
     endConsultation,
     leaveCall,
+    returnToJoinForm,
   } = useConsultation();
-
   if (joinState !== null) {
-    return <CallView joinState={joinState} busy={busy} onEndConsultation={endConsultation} onLeaveCall={leaveCall} />;
+    return (
+      <CallView
+        joinState={joinState}
+        consultationExpiresAt={consultation?.expires_at ?? null}
+        busy={busy}
+        onRequestJoinToken={joinConsultation}
+        onEndConsultation={endConsultation}
+        onLeaveCall={leaveCall}
+        onReturnToJoinForm={returnToJoinForm}
+        onStageChange={setCallStage}
+      />
+    );
   }
 
   return (
@@ -730,11 +1106,10 @@ function App() {
           consultationId={consultationId}
           participantName={participantName}
           role={role}
-          busy={busy}
           onConsultationIdChange={setConsultationId}
           onParticipantNameChange={setParticipantName}
           onRoleChange={setRole}
-          onSubmit={joinConsultation}
+          onSubmit={beginJoinSession}
         />
       </section>
 
