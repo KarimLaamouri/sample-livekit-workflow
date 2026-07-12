@@ -205,7 +205,7 @@ type ConsultationController = {
   setErrorNotice: (value: ErrorNotice | null) => void;
   setSessionNotice: (value: ErrorNotice | null) => void;
   createConsultation: () => Promise<void>;
-  beginJoinSession: () => void;
+  beginJoinSession: () => Promise<void>;
   joinConsultation: () => Promise<void>;
   endConsultation: () => Promise<void>;
   leaveCall: () => void;
@@ -296,46 +296,6 @@ function useConsultation(): ConsultationController {
     setJoinState((current) => (current === null ? current : null));
   }, []);
 
-  const beginJoinSession = useCallback(() => {
-    const id = consultationId.trim();
-
-    if (!id) {
-      setErrorNotice({
-        title: 'Consultation ID required',
-        message: 'Paste a consultation ID before continuing to device check.',
-        suggestion: 'Use the ID from the Create consultation panel.',
-      });
-      return;
-    }
-
-    setErrorNotice(null);
-    setSessionNotice(null);
-    setCallStage(null);
-    setJoinState({
-      consultationId: id,
-      token: null,
-      roomName: null,
-      participantName,
-      role,
-      expiresInSeconds: null,
-      e2eeKey: null,
-      tokenIssuedAt: null,
-    });
-    setStatus('Device check opened. Pick your camera and microphone before requesting a token.');
-  }, [consultationId, participantName, role]);
-
-  const leaveCall = useCallback(() => {
-    setJoinState(null);
-    setCallStage(null);
-    setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
-  }, []);
-
-  const returnToJoinForm = useCallback(() => {
-    setJoinState(null);
-    setCallStage(null);
-    setStatus('Join the consultation again from the form.');
-  }, []);
-
   const requestJson = useCallback(async <T,>(url: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(url, {
       headers: { 'Content-Type': 'application/json' },
@@ -347,6 +307,71 @@ function useConsultation(): ConsultationController {
     }
 
     return response.json() as Promise<T>;
+  }, []);
+
+  const beginJoinSession = useCallback(async () => {
+    const id = consultationId.trim();
+
+    if (!id) {
+      setErrorNotice({
+        title: 'Consultation ID required',
+        message: 'Paste a consultation ID before continuing to device check.',
+        suggestion: 'Use the ID from the Create consultation panel.',
+      });
+      return;
+    }
+
+    setBusy(true);
+    setErrorNotice(null);
+    setSessionNotice(null);
+    setCallStage(null);
+
+    try {
+      const tokenResponse = await requestJson<{
+        token: string;
+        room_name: string;
+        participant_name: string;
+        role: Role;
+        expires_in_seconds: number;
+        e2ee_key: string;
+      }>(`${API_URL}/api/consultations/${encodeURIComponent(id)}/token`, {
+        method: 'POST',
+        body: JSON.stringify({
+          participant_name: participantName,
+          role,
+        }),
+      });
+
+      setJoinState({
+        consultationId: id,
+        token: tokenResponse.token,
+        roomName: tokenResponse.room_name,
+        participantName: tokenResponse.participant_name,
+        role: tokenResponse.role,
+        expiresInSeconds: tokenResponse.expires_in_seconds,
+        e2eeKey: tokenResponse.e2ee_key,
+        tokenIssuedAt: new Date().toISOString(),
+      });
+      setStatus('Device check opened. Pick your camera and microphone before joining the room.');
+    } catch (e) {
+      setJoinState(null);
+      setErrorNotice(createErrorNotice(e, 'Validating the consultation'));
+      setStatus('Unable to validate the consultation. Review the details and try again.');
+    } finally {
+      setBusy(false);
+    }
+  }, [consultationId, participantName, requestJson, role]);
+
+  const leaveCall = useCallback(() => {
+    setJoinState(null);
+    setCallStage(null);
+    setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
+  }, []);
+
+  const returnToJoinForm = useCallback(() => {
+    setJoinState(null);
+    setCallStage(null);
+    setStatus('Join the consultation again from the form.');
   }, []);
 
   useEffect(() => {
@@ -604,9 +629,6 @@ function NoticeCard({ notice, kind, onDismiss, action }: NoticeCardProps) {
               {action.label}
             </button>
           )}
-          {typeof notice.status === 'number' && (
-            <span className="notice-badge">HTTP {notice.status}</span>
-          )}
           {onDismiss && (
             <button type="button" className="ghost-button" onClick={onDismiss}>
               Dismiss
@@ -785,8 +807,10 @@ function CallView({
 
       setConnectionNotice(notice);
       setConnectionAction(apiStatus === 404 || apiStatus === 409 || apiStatus === 410 || apiStatus === 403
-        ? () => onReturnToJoinForm
-        : () => () => {
+        ? () => {
+            onReturnToJoinForm();
+          }
+        : () => {
             setStage('connecting');
             void requestFreshToken(request);
           });
@@ -873,11 +897,11 @@ function CallView({
 
     return () => {
       cancelled = true;
-      room.disconnect();
     };
   }, [
     readyToConnect,
     skipPreview,
+    stage,
     deviceChoices,
     joinState.e2eeKey,
     joinState.token,
@@ -898,6 +922,44 @@ function CallView({
     ? formatCountdown(Math.ceil((tokenExpiresAtMs - now) / 1000))
     : null;
 
+  const handlePreJoinSubmit = useCallback((choices: any) => {
+    setConnectionNotice(null);
+    setConnectionAction(null);
+    setDeviceChoices({
+      username: choices.username,
+      videoEnabled: choices.videoEnabled,
+      audioEnabled: choices.audioEnabled,
+      videoDeviceId: choices.videoDeviceId,
+      audioDeviceId: choices.audioDeviceId,
+    });
+    setTokenRequestPending(true);
+    setStage('connecting');
+    void requestFreshToken({
+      consultationId: joinState.consultationId,
+      participantName: choices.username,
+      role: joinState.role,
+    });
+  }, [joinState.consultationId, joinState.role, requestFreshToken]);
+
+  const handlePreJoinError = useCallback((error: Error) => {
+    setConnectionNotice(createErrorNotice(error, 'Opening the device check'));
+  }, []);
+
+  const prejoinWidget = useMemo(() => (
+    <div data-lk-theme="default" className="prejoin-widget">
+      <PreJoin
+        defaults={{ username: joinState.participantName }}
+        joinLabel="Join consultation"
+        micLabel="Microphone"
+        camLabel="Camera"
+        userLabel="Display name"
+        persistUserChoices
+        onSubmit={handlePreJoinSubmit}
+        onError={handlePreJoinError}
+      />
+    </div>
+  ), [joinState.participantName, handlePreJoinSubmit, handlePreJoinError]);
+
   const consultationCountdown = consultationExpiresAt
     ? formatCountdown(Math.ceil((Date.parse(consultationExpiresAt) - now) / 1000))
     : null;
@@ -912,35 +974,7 @@ function CallView({
           {consultationCountdown && (
             <p className="prejoin-countdown">This consultation closes in {consultationCountdown}.</p>
           )}
-          <div data-lk-theme="default" className="prejoin-widget">
-            <PreJoin
-              defaults={{ username: joinState.participantName }}
-              joinLabel="Join consultation"
-              micLabel="Microphone"
-              camLabel="Camera"
-              userLabel="Display name"
-              persistUserChoices
-              onSubmit={(choices) => {
-                setConnectionNotice(null);
-                setConnectionAction(null);
-                setDeviceChoices({
-                  username: choices.username,
-                  videoEnabled: choices.videoEnabled,
-                  audioEnabled: choices.audioEnabled,
-                  videoDeviceId: choices.videoDeviceId,
-                  audioDeviceId: choices.audioDeviceId,
-                });
-                setTokenRequestPending(true);
-                setStage('connecting');
-                void requestFreshToken({
-                  consultationId: joinState.consultationId,
-                  participantName: choices.username,
-                  role: joinState.role,
-                });
-              }}
-              onError={(error) => setConnectionNotice(createErrorNotice(error, 'Opening the device check'))}
-            />
-          </div>
+          {prejoinWidget}
           {connectionNotice && (
             <NoticeCard
               notice={connectionNotice}
