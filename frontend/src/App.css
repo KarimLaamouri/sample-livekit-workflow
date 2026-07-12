@@ -552,6 +552,14 @@ button[type='submit']::after {
   --lk-border-radius: 12px;
 }
 
+.call-shell [data-lk-theme='default'] input[name='username'] {
+  color: #ffffff;
+}
+
+.call-shell [data-lk-theme='default'] input[name='username']::placeholder {
+  color: rgba(243, 238, 229, 0.72);
+}
+
 @media (max-width: 760px) {
   .teleconsultation-console,
   .brand-bar {
