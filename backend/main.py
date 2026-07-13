@@ -75,6 +75,20 @@ class CreateConsultationResponse(BaseModel):
     ended_at: str | None
 
 
+class ValidateJoinRequest(BaseModel):
+    participant_name: str = Field(min_length=1, max_length=80)
+    role: Role
+
+
+class ValidateJoinResponse(BaseModel):
+    consultation_id: str
+    room_name: str
+    participant_name: str
+    role: Role
+    expires_at: str
+    status: ConsultationStatus
+
+
 class TokenRequest(BaseModel):
     participant_name: str = Field(min_length=1, max_length=80)
     role: Role
@@ -773,6 +787,31 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         token_ttl_seconds=TOKEN_TTL_SECONDS,
         status="active",
         ended_at=None,
+    )
+
+
+@app.post("/api/consultations/{consultation_id}/validate", response_model=ValidateJoinResponse)
+async def validate_consultation_join(
+    consultation_id: str,
+    payload: ValidateJoinRequest,
+) -> ValidateJoinResponse:
+    """Upfront check for the prejoin step: confirms the consultation exists,
+    hasn't ended/expired, and the participant/role pair is allowed to join.
+    Does not mint a LiveKit token or touch the LiveKit API."""
+    consultation = get_consultation_or_404(consultation_id)
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.participant_name,
+        role=payload.role,
+    )
+
+    return ValidateJoinResponse(
+        consultation_id=consultation_id,
+        room_name=consultation["room_name"],
+        participant_name=payload.participant_name,
+        role=payload.role,
+        expires_at=consultation["expires_at"].isoformat(),
+        status=consultation["status"],
     )
 
 

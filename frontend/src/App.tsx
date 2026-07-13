@@ -327,14 +327,14 @@ function useConsultation(): ConsultationController {
     setCallStage(null);
 
     try {
-      const tokenResponse = await requestJson<{
-        token: string;
+      const validateResponse = await requestJson<{
+        consultation_id: string;
         room_name: string;
         participant_name: string;
         role: Role;
-        expires_in_seconds: number;
-        e2ee_key: string;
-      }>(`${API_URL}/api/consultations/${encodeURIComponent(id)}/token`, {
+        expires_at: string;
+        status: 'active' | 'ended';
+      }>(`${API_URL}/api/consultations/${encodeURIComponent(id)}/validate`, {
         method: 'POST',
         body: JSON.stringify({
           participant_name: participantName,
@@ -344,13 +344,13 @@ function useConsultation(): ConsultationController {
 
       setJoinState({
         consultationId: id,
-        token: tokenResponse.token,
-        roomName: tokenResponse.room_name,
-        participantName: tokenResponse.participant_name,
-        role: tokenResponse.role,
-        expiresInSeconds: tokenResponse.expires_in_seconds,
-        e2eeKey: tokenResponse.e2ee_key,
-        tokenIssuedAt: new Date().toISOString(),
+        token: null,
+        roomName: validateResponse.room_name,
+        participantName: validateResponse.participant_name,
+        role: validateResponse.role,
+        expiresInSeconds: null,
+        e2eeKey: null,
+        tokenIssuedAt: null,
       });
       setStatus('Device check opened. Pick your camera and microphone before joining the room.');
     } catch (e) {
@@ -791,6 +791,17 @@ function CallView({
 
     return () => window.clearInterval(intervalId);
   }, [joinState.expiresInSeconds, joinState.token, joinState.tokenIssuedAt]);
+
+  useEffect(() => {
+    if (stage !== 'preview' || !consultationExpiresAt) {
+      return;
+    }
+
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [stage, consultationExpiresAt]);
 
   const requestFreshToken = useCallback(async (request: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => {
     setConnectionNotice(null);
