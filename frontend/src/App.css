@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --color-bg: #FAF5EE;
   --color-surface: #FFFFFF;
   --color-surface-soft: #F4ECE0;
@@ -594,6 +594,203 @@ button[type='submit']::after {
 
   .ghost-button {
     width: 100%;
+  }
+}
+
+/* ── Waiting room: patient waiting screen ── */
+
+.waiting-room-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  min-height: calc(100dvh - 56px);
+  padding: 40px 20px;
+  color: var(--shell-strip-fg);
+  text-align: center;
+}
+
+.waiting-room-screen .spinner {
+  width: 36px;
+  height: 36px;
+}
+
+.waiting-room-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.waiting-room-subtext {
+  margin: 0;
+  max-width: 420px;
+  color: rgba(243, 238, 229, 0.6);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.waiting-room-denied {
+  color: #E7A796;
+  font-weight: 600;
+}
+
+.waiting-room-back {
+  margin-top: 8px;
+  background: transparent;
+  color: var(--shell-strip-fg);
+  border: 1px solid rgba(243, 238, 229, 0.25);
+}
+
+.waiting-room-back:hover:not(:disabled) {
+  background: rgba(243, 238, 229, 0.08);
+}
+
+.waiting-room-back::after {
+  content: none;
+}
+
+/* ── Waiting room: doctor-side panel ── */
+
+.waiting-room-panel {
+  padding: 10px 20px 14px;
+  background: rgba(243, 238, 229, 0.04);
+  border-bottom: 1px solid rgba(243, 238, 229, 0.08);
+  color: var(--shell-strip-fg);
+}
+
+.waiting-room-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.waiting-room-panel-header h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--shell-strip-fg);
+}
+
+.waiting-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 0 6px;
+  animation: badge-pulse 2s ease-in-out infinite;
+}
+
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.waiting-room-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.waiting-room-empty {
+  font-size: 13px;
+  color: rgba(243, 238, 229, 0.45);
+  margin: 0;
+}
+
+.waiting-room-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(243, 238, 229, 0.06);
+  border: 1px solid rgba(243, 238, 229, 0.08);
+}
+
+.waiting-room-entry-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.waiting-room-entry-name {
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waiting-room-entry-role {
+  font-size: 12px;
+  color: rgba(243, 238, 229, 0.55);
+  text-transform: capitalize;
+}
+
+.waiting-room-entry-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.admit-button {
+  min-height: 32px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #ffffff;
+  border: none;
+}
+
+.admit-button:hover:not(:disabled) {
+  background: var(--color-accent-dark);
+}
+
+.admit-button::after {
+  content: none;
+}
+
+.deny-button {
+  min-height: 32px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: transparent;
+  color: #E7A796;
+  border: 1px solid rgba(231, 167, 150, 0.3);
+}
+
+.deny-button:hover:not(:disabled) {
+  background: rgba(181, 75, 58, 0.15);
+  border-color: rgba(231, 167, 150, 0.5);
+}
+
+.deny-button::after {
+  content: none;
+}
+
+@media (max-width: 760px) {
+  .waiting-room-entry {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .waiting-room-entry-actions {
+    flex-direction: column;
   }
 }
 

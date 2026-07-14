@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LiveKitRoom,
   VideoConference,
@@ -53,6 +53,13 @@ type AuditEvent = {
   ended_by?: string;
   room_name?: string;
   source?: string;
+};
+
+type WaitingRoomEntryData = {
+  participant_name: string;
+  role: Role;
+  status: 'waiting' | 'admitted' | 'denied';
+  requested_at: string;
 };
 
 const parseApiError = async (response: Response): Promise<ApiError> => {
@@ -177,6 +184,8 @@ type CallViewProps = {
   joinState: JoinState;
   consultationExpiresAt: string | null;
   busy: boolean;
+  consultationId: string;
+  doctorName: string;
   onRequestJoinToken: (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => Promise<void>;
   onEndConsultation: () => void;
   onLeaveCall: () => void;
@@ -196,6 +205,8 @@ type ConsultationController = {
   errorNotice: ErrorNotice | null;
   sessionNotice: ErrorNotice | null;
   busy: boolean;
+  waitingForAdmission: boolean;
+  waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | null;
   setCallStage: (stage: 'preview' | 'connecting' | 'call' | null) => void;
   setDoctorName: (value: string) => void;
   setPatientName: (value: string) => void;
@@ -210,6 +221,7 @@ type ConsultationController = {
   endConsultation: () => Promise<void>;
   leaveCall: () => void;
   returnToJoinForm: () => void;
+  cancelWaiting: () => void;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -275,6 +287,8 @@ function useConsultation(): ConsultationController {
   const [errorNotice, setErrorNotice] = useState<ErrorNotice | null>(null);
   const [sessionNotice, setSessionNotice] = useState<ErrorNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  const [waitingForAdmission, setWaitingForAdmission] = useState(false);
+  const [waitingRoomStatus, setWaitingRoomStatus] = useState<'waiting' | 'admitted' | 'denied' | null>(null);
 
   const markConsultationEnded = useCallback((endedAt: string, notice: ErrorNotice) => {
     setConsultation((current) => {
@@ -309,6 +323,14 @@ function useConsultation(): ConsultationController {
     return response.json() as Promise<T>;
   }, []);
 
+  const cancelWaiting = useCallback(() => {
+    setWaitingForAdmission(false);
+    setWaitingRoomStatus(null);
+    setJoinState(null);
+    setCallStage(null);
+    setStatus('Join the consultation again from the form.');
+  }, []);
+
   const beginJoinSession = useCallback(async () => {
     const id = consultationId.trim();
 
@@ -325,6 +347,8 @@ function useConsultation(): ConsultationController {
     setErrorNotice(null);
     setSessionNotice(null);
     setCallStage(null);
+    setWaitingForAdmission(false);
+    setWaitingRoomStatus(null);
 
     try {
       const validateResponse = await requestJson<{
@@ -342,6 +366,56 @@ function useConsultation(): ConsultationController {
         }),
       });
 
+      // For non-doctor roles, register in the waiting room first.
+      if (role !== 'doctor') {
+        const wrResponse = await requestJson<WaitingRoomEntryData>(
+          `${API_URL}/api/consultations/${encodeURIComponent(id)}/waiting-room/request`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              participant_name: participantName,
+              role,
+            }),
+          },
+        );
+
+        setWaitingRoomStatus(wrResponse.status);
+
+        if (wrResponse.status === 'denied') {
+          setWaitingForAdmission(true);
+          setJoinState({
+            consultationId: id,
+            token: null,
+            roomName: validateResponse.room_name,
+            participantName: validateResponse.participant_name,
+            role: validateResponse.role,
+            expiresInSeconds: null,
+            e2eeKey: null,
+            tokenIssuedAt: null,
+          });
+          setStatus('Your request to join was denied by the doctor.');
+          return;
+        }
+
+        if (wrResponse.status === 'waiting') {
+          setWaitingForAdmission(true);
+          setJoinState({
+            consultationId: id,
+            token: null,
+            roomName: validateResponse.room_name,
+            participantName: validateResponse.participant_name,
+            role: validateResponse.role,
+            expiresInSeconds: null,
+            e2eeKey: null,
+            tokenIssuedAt: null,
+          });
+          setStatus('Waiting for the doctor to admit you.');
+          return;
+        }
+
+        // status === 'admitted' — fall through to normal join flow.
+      }
+
       setJoinState({
         consultationId: id,
         token: null,
@@ -355,6 +429,8 @@ function useConsultation(): ConsultationController {
       setStatus('Device check opened. Pick your camera and microphone before joining the room.');
     } catch (e) {
       setJoinState(null);
+      setWaitingForAdmission(false);
+      setWaitingRoomStatus(null);
       setErrorNotice(createErrorNotice(e, 'Validating the consultation'));
       setStatus('Unable to validate the consultation. Review the details and try again.');
     } finally {
@@ -365,12 +441,16 @@ function useConsultation(): ConsultationController {
   const leaveCall = useCallback(() => {
     setJoinState(null);
     setCallStage(null);
+    setWaitingForAdmission(false);
+    setWaitingRoomStatus(null);
     setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
   }, []);
 
   const returnToJoinForm = useCallback(() => {
     setJoinState(null);
     setCallStage(null);
+    setWaitingForAdmission(false);
+    setWaitingRoomStatus(null);
     setStatus('Join the consultation again from the form.');
   }, []);
 
@@ -588,6 +668,8 @@ function useConsultation(): ConsultationController {
     errorNotice,
     sessionNotice,
     busy,
+    waitingForAdmission,
+    waitingRoomStatus,
     setCallStage,
     setDoctorName,
     setPatientName,
@@ -602,6 +684,7 @@ function useConsultation(): ConsultationController {
     endConsultation,
     leaveCall,
     returnToJoinForm,
+    cancelWaiting,
   };
 }
 
@@ -733,14 +816,221 @@ type DeviceChoices = {
   audioDeviceId: string;
 };
 
+function WaitingRoomScreen({
+  consultationId,
+  participantName,
+  role,
+  waitingRoomStatus,
+  onCancel,
+  onAdmitted,
+}: {
+  consultationId: string;
+  participantName: string;
+  role: Role;
+  waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | null;
+  onCancel: () => void;
+  onAdmitted: () => void;
+}) {
+  useEffect(() => {
+    if (waitingRoomStatus !== 'waiting') {
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollStatus = async () => {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/request`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ participant_name: participantName, role }),
+          },
+        );
+
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const entry = (await response.json()) as WaitingRoomEntryData;
+
+        if (cancelled) {
+          return;
+        }
+
+        if (entry.status === 'admitted') {
+          onAdmitted();
+        }
+      } catch {
+        // Silently retry on next interval.
+      }
+    };
+
+    const intervalId = window.setInterval(pollStatus, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [consultationId, participantName, role, waitingRoomStatus, onAdmitted]);
+
+  return (
+    <div className="call-shell">
+      <BrandBar dark />
+      <div className="waiting-room-screen">
+        {waitingRoomStatus === 'denied' ? (
+          <>
+            <p className="waiting-room-heading">Access denied</p>
+            <p className="waiting-room-subtext waiting-room-denied">
+              The doctor has denied your request to join this consultation.
+            </p>
+            <button type="button" className="waiting-room-back" onClick={onCancel}>
+              Back to join form
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="spinner" aria-hidden="true" />
+            <p className="waiting-room-heading">Waiting for the doctor to admit you</p>
+            <p className="waiting-room-subtext">
+              The doctor has not joined yet or hasn't admitted you. You'll be moved to the device check automatically once approved.
+            </p>
+            <button type="button" className="waiting-room-back" onClick={onCancel}>
+              Cancel
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WaitingRoomPanel({
+  consultationId,
+  doctorName,
+}: {
+  consultationId: string;
+  doctorName: string;
+}) {
+  const [entries, setEntries] = useState<WaitingRoomEntryData[]>([]);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room`,
+        );
+
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const data = (await response.json()) as WaitingRoomEntryData[];
+
+        if (!cancelled) {
+          setEntries(data);
+        }
+      } catch {
+        // Silently retry on next interval.
+      }
+    };
+
+    void poll();
+    const intervalId = window.setInterval(poll, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [consultationId]);
+
+  const handleAction = useCallback(
+    async (participantName: string, action: 'admit' | 'deny') => {
+      setActionBusy(participantName);
+
+      try {
+        const response = await fetch(
+          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/${encodeURIComponent(participantName)}/${action}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              actor_name: doctorName,
+              actor_role: 'doctor',
+            }),
+          },
+        );
+
+        if (response.ok) {
+          setEntries((current) =>
+            current.filter((e) => e.participant_name !== participantName),
+          );
+        }
+      } catch {
+        // Will retry on next poll.
+      } finally {
+        setActionBusy(null);
+      }
+    },
+    [consultationId, doctorName],
+  );
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="waiting-room-panel">
+      <div className="waiting-room-panel-header">
+        <h3>Waiting room</h3>
+        <span className="waiting-badge">{entries.length}</span>
+      </div>
+      <div className="waiting-room-list">
+        {entries.map((entry) => (
+          <div key={entry.participant_name} className="waiting-room-entry">
+            <div className="waiting-room-entry-info">
+              <span className="waiting-room-entry-name">{entry.participant_name}</span>
+              <span className="waiting-room-entry-role">{entry.role}</span>
+            </div>
+            <div className="waiting-room-entry-actions">
+              <button
+                type="button"
+                className="admit-button"
+                disabled={actionBusy === entry.participant_name}
+                onClick={() => void handleAction(entry.participant_name, 'admit')}
+              >
+                Admit
+              </button>
+              <button
+                type="button"
+                className="deny-button"
+                disabled={actionBusy === entry.participant_name}
+                onClick={() => void handleAction(entry.participant_name, 'deny')}
+              >
+                Deny
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CallView({
   joinState,
   consultationExpiresAt,
   busy,
+  consultationId,
+  doctorName,
   onRequestJoinToken,
   onEndConsultation,
   onLeaveCall,
-    onReturnToJoinForm,
+  onReturnToJoinForm,
   onStageChange,
 }: CallViewProps) {
   const { room, keyProvider } = useMemo(() => {
@@ -819,12 +1109,12 @@ function CallView({
       setConnectionNotice(notice);
       setConnectionAction(apiStatus === 404 || apiStatus === 409 || apiStatus === 410 || apiStatus === 403
         ? () => {
-            onReturnToJoinForm();
-          }
+          onReturnToJoinForm();
+        }
         : () => {
-            setStage('connecting');
-            void requestFreshToken(request);
-          });
+          setStage('connecting');
+          void requestFreshToken(request);
+        });
       setStage('preview');
     } finally {
       setTokenRequestPending(false);
@@ -996,12 +1286,12 @@ function CallView({
               }}
               action={connectionAction
                 ? {
-                    label: connectionNotice.title === 'Consultation not found' || connectionNotice.title === 'Consultation no longer available' || connectionNotice.title === 'Access denied'
-                      ? 'Back to join form'
-                      : 'Retry with a fresh token',
-                    onClick: connectionAction,
-                    disabled: busy,
-                  }
+                  label: connectionNotice.title === 'Consultation not found' || connectionNotice.title === 'Consultation no longer available' || connectionNotice.title === 'Access denied'
+                    ? 'Back to join form'
+                    : 'Retry with a fresh token',
+                  onClick: connectionAction,
+                  disabled: busy,
+                }
                 : undefined}
             />
           )}
@@ -1037,6 +1327,9 @@ function CallView({
           <button type="button" className="leave-button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
         </div>
       </div>
+      {joinState.role === 'doctor' && (
+        <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
+      )}
       {connectionNotice && (
         <NoticeCard
           notice={connectionNotice}
@@ -1047,10 +1340,10 @@ function CallView({
           }}
           action={connectionAction
             ? {
-                label: 'Retry with a fresh token',
-                onClick: connectionAction,
-                disabled: busy,
-              }
+              label: 'Retry with a fresh token',
+              onClick: connectionAction,
+              disabled: busy,
+            }
             : undefined}
         />
       )}
@@ -1096,6 +1389,8 @@ function App() {
     errorNotice,
     sessionNotice,
     busy,
+    waitingForAdmission,
+    waitingRoomStatus,
     setCallStage,
     setDoctorName,
     setPatientName,
@@ -1110,13 +1405,36 @@ function App() {
     endConsultation,
     leaveCall,
     returnToJoinForm,
+    cancelWaiting,
   } = useConsultation();
+
+  const handleWaitingRoomAdmitted = useCallback(() => {
+    // Transition from waiting screen to the normal prejoin/device-check flow.
+    // Re-run beginJoinSession which will now get status=admitted.
+    void beginJoinSession();
+  }, [beginJoinSession]);
+
+  if (joinState !== null && waitingForAdmission) {
+    return (
+      <WaitingRoomScreen
+        consultationId={joinState.consultationId}
+        participantName={joinState.participantName}
+        role={joinState.role}
+        waitingRoomStatus={waitingRoomStatus}
+        onCancel={cancelWaiting}
+        onAdmitted={handleWaitingRoomAdmitted}
+      />
+    );
+  }
+
   if (joinState !== null) {
     return (
       <CallView
         joinState={joinState}
         consultationExpiresAt={consultation?.expires_at ?? null}
         busy={busy}
+        consultationId={consultationId}
+        doctorName={doctorName}
         onRequestJoinToken={joinConsultation}
         onEndConsultation={endConsultation}
         onLeaveCall={leaveCall}

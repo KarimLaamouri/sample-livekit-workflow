@@ -1,4 +1,4 @@
-﻿import json
+import json
 import logging
 import os
 import secrets
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 Role = Literal["doctor", "patient", "observer"]
 ConsultationStatus = Literal["active", "ended"]
+WaitingRoomStatus = Literal["waiting", "admitted", "denied"]
 
 app = FastAPI(title="Tachafy Teleconsultation Demo")
 
@@ -115,6 +116,23 @@ class EndConsultationResponse(BaseModel):
     status: ConsultationStatus
     ended_at: str
     ended_by: str
+
+
+class WaitingRoomRequestPayload(BaseModel):
+    participant_name: str = Field(min_length=1, max_length=80)
+    role: Role
+
+
+class WaitingRoomEntry(BaseModel):
+    participant_name: str
+    role: Role
+    status: WaitingRoomStatus
+    requested_at: str
+
+
+class WaitingRoomActionPayload(BaseModel):
+    actor_name: str = Field(min_length=1, max_length=80)
+    actor_role: Role
 
 
 def utc_now() -> datetime:
@@ -615,6 +633,26 @@ async def terminate_room(room_name: str) -> None:
         )
 
 
+async def _is_doctor_in_room(room_name: str) -> bool:
+    """Check whether any participant with a doctor identity is in the room."""
+    livekit_api_url = resolve_livekit_api_url()
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            participants = await lkapi.room.list_participants(
+                api.ListParticipantsRequest(room=room_name)
+            )
+            for participant in participants.participants:
+                role, _name, _tag = parse_livekit_identity(participant.identity)
+                if role == "doctor":
+                    return True
+    except Exception:
+        logger.exception(
+            "Failed to list participants for doctor check: room_name=%s",
+            room_name,
+        )
+    return False
+
+
 def grants_for(role: Role, room_name: str) -> api.VideoGrants:
     if role == "observer":
         return api.VideoGrants(
@@ -623,7 +661,7 @@ def grants_for(role: Role, room_name: str) -> api.VideoGrants:
             can_publish=False,
             can_subscribe=True,
             can_publish_data=False,
-            hidden=True,
+            hidden=False,
         )
 
     return api.VideoGrants(
@@ -746,6 +784,7 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         "status": "active",
         "ended_at": None,
         "ended_by": None,
+        "waiting_room": {},
     }
 
     audit(
@@ -815,6 +854,182 @@ async def validate_consultation_join(
     )
 
 
+@app.post("/api/consultations/{consultation_id}/waiting-room/request", response_model=WaitingRoomEntry)
+async def request_waiting_room(
+    consultation_id: str,
+    payload: WaitingRoomRequestPayload,
+) -> WaitingRoomEntry:
+    """Non-doctor participants request access to the consultation waiting room."""
+    consultation = get_consultation_or_404(consultation_id)
+
+    if payload.role == "doctor":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "DOCTOR_BYPASS",
+                "message": "Doctors do not use the waiting room.",
+            },
+        )
+
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.participant_name,
+        role=payload.role,
+    )
+
+    waiting_room: dict[str, dict] = consultation["waiting_room"]
+
+    # If participant already has an entry, return its current state.
+    existing = waiting_room.get(payload.participant_name)
+    if existing is not None:
+        return WaitingRoomEntry(
+            participant_name=payload.participant_name,
+            role=existing["role"],
+            status=existing["status"],
+            requested_at=existing["requested_at"],
+        )
+
+    # Check if a doctor is already an active participant in the room.
+    doctor_present = await _is_doctor_in_room(consultation["room_name"])
+    status: WaitingRoomStatus = "admitted" if doctor_present else "waiting"
+    requested_at = utc_now().isoformat()
+
+    entry = {
+        "role": payload.role,
+        "status": status,
+        "requested_at": requested_at,
+    }
+    waiting_room[payload.participant_name] = entry
+
+    audit(
+        "waiting_room.requested",
+        consultation_id=consultation_id,
+        participant_name=payload.participant_name,
+        role=payload.role,
+        status=status,
+    )
+
+    if status == "admitted":
+        audit(
+            "waiting_room.admitted",
+            consultation_id=consultation_id,
+            participant_name=payload.participant_name,
+            role=payload.role,
+            auto=True,
+        )
+
+    return WaitingRoomEntry(
+        participant_name=payload.participant_name,
+        role=payload.role,
+        status=status,
+        requested_at=requested_at,
+    )
+
+
+@app.get("/api/consultations/{consultation_id}/waiting-room", response_model=list[WaitingRoomEntry])
+async def list_waiting_room(
+    consultation_id: str,
+) -> list[WaitingRoomEntry]:
+    """Return all pending (waiting) entries — used by the doctor to poll."""
+    consultation = get_consultation_or_404(consultation_id)
+    waiting_room: dict[str, dict] = consultation["waiting_room"]
+
+    return [
+        WaitingRoomEntry(
+            participant_name=name,
+            role=entry["role"],
+            status=entry["status"],
+            requested_at=entry["requested_at"],
+        )
+        for name, entry in waiting_room.items()
+        if entry["status"] == "waiting"
+    ]
+
+
+@app.post("/api/consultations/{consultation_id}/waiting-room/{participant_name}/admit", response_model=WaitingRoomEntry)
+async def admit_participant(
+    consultation_id: str,
+    participant_name: str,
+    payload: WaitingRoomActionPayload,
+) -> WaitingRoomEntry:
+    """Doctor admits a waiting participant."""
+    consultation = get_consultation_or_404(consultation_id)
+
+    if payload.actor_role != "doctor":
+        raise HTTPException(status_code=403, detail="Only doctor can admit participants")
+
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.actor_name,
+        role=payload.actor_role,
+    )
+
+    waiting_room: dict[str, dict] = consultation["waiting_room"]
+    entry = waiting_room.get(participant_name)
+
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Participant not found in waiting room")
+
+    entry["status"] = "admitted"
+
+    audit(
+        "waiting_room.admitted",
+        consultation_id=consultation_id,
+        participant_name=participant_name,
+        role=entry["role"],
+        admitted_by=payload.actor_name,
+    )
+
+    return WaitingRoomEntry(
+        participant_name=participant_name,
+        role=entry["role"],
+        status="admitted",
+        requested_at=entry["requested_at"],
+    )
+
+
+@app.post("/api/consultations/{consultation_id}/waiting-room/{participant_name}/deny", response_model=WaitingRoomEntry)
+async def deny_participant(
+    consultation_id: str,
+    participant_name: str,
+    payload: WaitingRoomActionPayload,
+) -> WaitingRoomEntry:
+    """Doctor denies a waiting participant."""
+    consultation = get_consultation_or_404(consultation_id)
+
+    if payload.actor_role != "doctor":
+        raise HTTPException(status_code=403, detail="Only doctor can deny participants")
+
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.actor_name,
+        role=payload.actor_role,
+    )
+
+    waiting_room: dict[str, dict] = consultation["waiting_room"]
+    entry = waiting_room.get(participant_name)
+
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Participant not found in waiting room")
+
+    entry["status"] = "denied"
+
+    audit(
+        "waiting_room.denied",
+        consultation_id=consultation_id,
+        participant_name=participant_name,
+        role=entry["role"],
+        denied_by=payload.actor_name,
+    )
+
+    return WaitingRoomEntry(
+        participant_name=participant_name,
+        role=entry["role"],
+        status="denied",
+        requested_at=entry["requested_at"],
+    )
+
+
 @app.post("/api/consultations/{consultation_id}/token", response_model=TokenResponse)
 async def create_consultation_token(
     consultation_id: str,
@@ -827,6 +1042,19 @@ async def create_consultation_token(
         participant_name=payload.participant_name,
         role=payload.role,
     )
+
+    # Gate: non-doctor participants must be admitted via the waiting room.
+    if payload.role != "doctor":
+        waiting_room: dict[str, dict] = consultation["waiting_room"]
+        wr_entry = waiting_room.get(payload.participant_name)
+        if wr_entry is None or wr_entry["status"] != "admitted":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "NOT_ADMITTED",
+                    "message": "You have not been admitted to this consultation. Please request access via the waiting room.",
+                },
+            )
 
     await ensure_room_exists_for_consultation(consultation)
 
