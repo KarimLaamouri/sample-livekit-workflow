@@ -1,26 +1,30 @@
-import json
+﻿import json
 import logging
 import os
 import secrets
-from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import Depends, FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from google.protobuf.message import Message
 from google.protobuf.json_format import MessageToDict
+from google.protobuf.message import Message
 from livekit import api
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import crud
+from database import get_db
+from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel
 
 load_dotenv()
 
 TOKEN_TTL_SECONDS = 2 * 60
 DEPARTURE_TIMEOUT = 120
 CONSULTATION_TTL_MINUTES = 60
-MAX_AUDIT_EVENTS = 200
+AUDIT_EVENTS_LIMIT = 200
 TRACK_TYPE_LABELS = {
     0: "audio",
     1: "video",
@@ -56,10 +60,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-consultations: dict[str, dict[str, Any]] = {}
-audit_events: list[dict[str, Any]] = []
-processed_webhook_event_ids: OrderedDict[str, None] = OrderedDict()
 
 
 class CreateConsultationRequest(BaseModel):
@@ -139,21 +139,6 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _clean_audit_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        cleaned: dict[str, Any] = {}
-        for key, sub_value in value.items():
-            cleaned_value = _clean_audit_value(sub_value)
-            if cleaned_value is not None:
-                cleaned[key] = cleaned_value
-        return cleaned or None
-    if isinstance(value, list):
-        cleaned = [_clean_audit_value(item) for item in value]
-        cleaned = [item for item in cleaned if item is not None]
-        return cleaned or None
-    return value
-
-
 def _proto_message_to_dict(proto: Any) -> dict[str, Any] | None:
     if not isinstance(proto, Message):
         return None
@@ -164,100 +149,11 @@ def _proto_message_to_dict(proto: Any) -> dict[str, Any] | None:
     )
 
 
-def audit(event_type: str, **details: Any) -> None:
-    cleaned_details = {
-        key: _clean_audit_value(value)
-        for key, value in details.items()
-        if value is not None
-    }
-
-    audit_events.append(
-        {
-            "timestamp": utc_now().isoformat(),
-            "event_type": event_type,
-            **cleaned_details,
-        }
-    )
-    del audit_events[:-MAX_AUDIT_EVENTS]
-
-
-def _find_consultation_by_room_name(room_name: str) -> dict[str, Any] | None:
-    for consultation in consultations.values():
-        if consultation["room_name"] == room_name:
-            return consultation
-    return None
-
-
-def _find_consultation_by_room_metadata(room_metadata: Any) -> dict[str, Any] | None:
-    if isinstance(room_metadata, dict):
-        consultation_id = room_metadata.get("consultation_id")
-        if isinstance(consultation_id, str):
-            return consultations.get(consultation_id)
-    return None
-
-
 def _is_room_termination_event(event_type: str) -> bool:
     normalized = (event_type or "").lower()
     return normalized.startswith("room.") and any(
         keyword in normalized
         for keyword in ("ended", "closed", "destroyed", "expired", "finished")
-    )
-
-
-def _mark_consultation_ended_by_system(consultation: dict[str, Any]) -> None:
-    if consultation.get("status") == "ended":
-        return
-
-    ended_at = _set_consultation_ended_state(consultation, ended_by="system")
-
-    if ended_at is None:
-        return
-
-    audit(
-        "consultation.ended",
-        consultation_id=consultation["consultation_id"],
-        room_name=consultation["room_name"],
-        ended_by="system",
-        source="webhook",
-    )
-
-
-def _normalize_processed_webhook_event_ids() -> None:
-    while len(processed_webhook_event_ids) > MAX_AUDIT_EVENTS:
-        processed_webhook_event_ids.popitem(last=False)
-
-
-def _remember_webhook_event_id(event_id: str) -> bool:
-    if event_id in processed_webhook_event_ids:
-        return False
-
-    processed_webhook_event_ids[event_id] = None
-    _normalize_processed_webhook_event_ids()
-    return True
-
-
-def _set_consultation_ended_state(
-    consultation: dict[str, Any],
-    *,
-    ended_by: str,
-) -> str | None:
-    if consultation.get("status") == "ended":
-        return consultation.get("ended_at")
-
-    ended_at = utc_now().isoformat()
-    consultation["status"] = "ended"
-    consultation["ended_at"] = ended_at
-    consultation["ended_by"] = ended_by
-    return ended_at
-
-
-def _build_consultation_ended_response(consultation: dict[str, Any]) -> EndConsultationResponse:
-    return EndConsultationResponse(
-        consultation_id=consultation["consultation_id"],
-        room_name=consultation["room_name"],
-        status="ended",
-        ended_at=consultation["ended_at"],
-        ended_by=consultation["ended_by"],
     )
 
 
@@ -396,7 +292,9 @@ def _build_participant_audit_data_from_participant(participant: Any) -> dict[str
     )
 
 
-async def _verify_and_parse_webhook(request: Request, authorization: str | None) -> Any | None:
+async def _verify_and_parse_webhook(
+    session: AsyncSession, request: Request, authorization: str | None
+) -> Any | None:
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization Header")
 
@@ -413,13 +311,17 @@ async def _verify_and_parse_webhook(request: Request, authorization: str | None)
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     event_id = getattr(event, "id", None)
-    if isinstance(event_id, str) and not _remember_webhook_event_id(event_id):
-        return None
+    if isinstance(event_id, str):
+        is_new = await crud.remember_webhook_event_id(session, event_id)
+        if not is_new:
+            return None
 
     return event
 
 
-def _resolve_consultation_from_event(event: Any) -> dict[str, Any] | None:
+async def _resolve_consultation_from_event(
+    session: AsyncSession, event: Any
+) -> Consultation | None:
     room = getattr(event, "room", None)
     room_data = _build_room_audit_data(room)
     room_name = None
@@ -427,23 +329,25 @@ def _resolve_consultation_from_event(event: Any) -> dict[str, Any] | None:
         room_name = room_data.get("room_name") or room_data.get("name")
 
     if room_name:
-        consultation = _find_consultation_by_room_name(room_name)
+        consultation = await crud.find_consultation_by_room_name(session, room_name)
         if consultation is not None:
             return consultation
 
     room_metadata = room_data.get("metadata") if room_data else None
     if room_metadata is not None:
-        return _find_consultation_by_room_metadata(room_metadata)
+        return await crud.find_consultation_by_room_metadata(session, room_metadata)
 
     return None
 
 
-def _handle_termination_if_applicable(event: Any, consultation: dict[str, Any] | None) -> None:
+async def _handle_termination_if_applicable(
+    session: AsyncSession, event: Any, consultation: Consultation | None
+) -> None:
     if consultation is None:
         return
 
     if _is_room_termination_event(getattr(event, "event", "unknown")):
-        _mark_consultation_ended_by_system(consultation)
+        await crud.mark_consultation_ended_by_system(session, consultation)
 
 
 def _build_track_labels(track: Any) -> tuple[str | None, str | None, dict[str, Any] | None]:
@@ -473,14 +377,16 @@ def _build_track_labels(track: Any) -> tuple[str | None, str | None, dict[str, A
     elif raw_encryption is not None:
         encryption_label = str(raw_encryption).lower()
 
-    return track_type_label, track_source_label,{
+    return track_type_label, track_source_label, {
         "type": track_type_label,
-        "source":  track_source_label,
+        "source": track_source_label,
         "encryption": encryption_label,
     }
 
 
-def _record_webhook_audit(event: Any, consultation: dict[str, Any] | None) -> None:
+async def _record_webhook_audit(
+    session: AsyncSession, event: Any, consultation: Consultation | None
+) -> None:
     event_type = getattr(event, "event", "unknown")
     event_label = f"livekit.{event_type}"
 
@@ -509,9 +415,10 @@ def _record_webhook_audit(event: Any, consultation: dict[str, Any] | None) -> No
             label_parts.append(track_source_label)
         event_label = f"{event_label} ({': '.join(label_parts)})"
 
-    audit(
+    await crud.create_audit_event(
+        session,
         event_label,
-        consultation_id=consultation["consultation_id"] if consultation else None,
+        consultation_id=consultation.consultation_id if consultation else None,
         room=room_data,
         participant=participant_data,
         track=track_info,
@@ -547,47 +454,20 @@ def resolve_livekit_api_url() -> str:
     return normalized.rstrip("/")
 
 
-def get_consultation_or_404(
-    consultation_id: str,
-    *,
-    include_ended: bool = False,
-) -> dict[str, Any]:
-    consultation = consultations.get(consultation_id)
-
-    if consultation is None:
-        raise HTTPException(status_code=404, detail="Consultation not found")
-
-    if consultation["expires_at"] < utc_now():
-        audit("consultation.expired", consultation_id=consultation_id)
-        consultations.pop(consultation_id, None)
-        raise HTTPException(status_code=410, detail="Consultation expired")
-
-    if not include_ended and consultation.get("status") == "ended":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "CONSULTATION_ENDED",
-                "message": "Consultation has ended",
-            },
-        )
-
-    return consultation
-
-
 def ensure_role_allowed_for_consultation(
-    consultation: dict[str, Any],
+    consultation: Consultation,
     *,
     participant_name: str,
     role: Role,
 ) -> None:
-    if role == "doctor" and participant_name != consultation["doctor_name"]:
+    if role == "doctor" and participant_name != consultation.doctor_name:
         raise HTTPException(status_code=403, detail="Participant is not assigned as doctor")
 
-    if role == "patient" and participant_name != consultation["patient_name"]:
+    if role == "patient" and participant_name != consultation.patient_name:
         raise HTTPException(status_code=403, detail="Participant is not assigned as patient")
 
 
-def require_doctor_actor(consultation: dict[str, Any], payload: EndConsultationRequest) -> None:
+def require_doctor_actor(consultation: Consultation, payload: EndConsultationRequest) -> None:
     if payload.role != "doctor":
         raise HTTPException(status_code=403, detail="Only doctor can end a consultation")
 
@@ -621,11 +501,6 @@ async def terminate_room(room_name: str) -> None:
 
             await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
     except Exception:
-        audit(
-            "consultation.room_termination_failed",
-            room_name=room_name,
-            livekit_api_url=livekit_api_url,
-        )
         logger.exception(
             "Failed to terminate LiveKit room: room_name=%s livekit_api_url=%s",
             room_name,
@@ -674,15 +549,17 @@ def grants_for(role: Role, room_name: str) -> api.VideoGrants:
     )
 
 
-async def ensure_room_exists_for_consultation(consultation: dict[str, Any]) -> None:
-    room_name = consultation["room_name"]
+async def ensure_room_exists_for_consultation(
+    session: AsyncSession, consultation: Consultation
+) -> None:
+    room_name = consultation.room_name
     livekit_api_url = resolve_livekit_api_url()
 
     try:
         async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
             response = await lkapi.room.list_rooms(api.ListRoomsRequest(names=[room_name]))
             if not getattr(response, "rooms", []):
-                _mark_consultation_ended_by_system(consultation)
+                await crud.mark_consultation_ended_by_system(session, consultation)
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -693,14 +570,15 @@ async def ensure_room_exists_for_consultation(consultation: dict[str, Any]) -> N
     except HTTPException:
         raise
     except Exception:
-        audit(
+        await crud.create_audit_event(
+            session,
             "consultation.room_existence_check_failed",
-            consultation_id=consultation["consultation_id"],
+            consultation_id=consultation.consultation_id,
             room_name=room_name,
         )
         logger.exception(
             "Failed to verify consultation room state: consultation_id=%s room_name=%s",
-            consultation["consultation_id"],
+            consultation.consultation_id,
             room_name,
         )
         raise HTTPException(
@@ -737,6 +615,16 @@ def build_token(
     )
 
 
+def _build_consultation_ended_response(consultation: Consultation) -> EndConsultationResponse:
+    return EndConsultationResponse(
+        consultation_id=consultation.consultation_id,
+        room_name=consultation.room_name,
+        status="ended",
+        ended_at=consultation.ended_at.isoformat(),
+        ended_by=consultation.ended_by,
+    )
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     health_status: dict[str, Any] = {
@@ -757,7 +645,10 @@ async def health() -> dict[str, Any]:
 
 
 @app.post("/api/consultations", response_model=CreateConsultationResponse)
-async def create_consultation(payload: CreateConsultationRequest) -> CreateConsultationResponse:
+async def create_consultation(
+    payload: CreateConsultationRequest,
+    session: AsyncSession = Depends(get_db),
+) -> CreateConsultationResponse:
     require_livekit_credentials()
 
     consultation_id = secrets.token_urlsafe(12)
@@ -773,21 +664,18 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
         separators=(",", ":"),
     )
 
-    consultations[consultation_id] = {
-        "consultation_id": consultation_id,
-        "room_name": room_name,
-        "doctor_name": payload.doctor_name,
-        "patient_name": payload.patient_name,
-        "e2ee_key": e2ee_key,
-        "created_at": utc_now(),
-        "expires_at": expires_at,
-        "status": "active",
-        "ended_at": None,
-        "ended_by": None,
-        "waiting_room": {},
-    }
+    await crud.create_consultation(
+        session,
+        consultation_id=consultation_id,
+        room_name=room_name,
+        doctor_name=payload.doctor_name,
+        patient_name=payload.patient_name,
+        e2ee_key=e2ee_key,
+        expires_at=expires_at,
+    )
 
-    audit(
+    await crud.create_audit_event(
+        session,
         "consultation.created",
         consultation_id=consultation_id,
         room_name=room_name,
@@ -806,14 +694,20 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
                 )
             )
     except Exception as exc:
-        consultations.pop(consultation_id, None)
-        audit(
+        # Discard the not-yet-committed consultation + "created" audit row,
+        # then persist a fresh failure record on its own so the audit trail
+        # survives even though the consultation itself never comes into
+        # existence (mirrors the old dict.pop(consultation_id) behavior).
+        await session.rollback()
+        await crud.create_audit_event(
+            session,
             "consultation.room_creation_failed",
             consultation_id=consultation_id,
             room_name=room_name,
             livekit_api_url=livekit_api_url,
             error=str(exc),
         )
+        await session.commit()
         raise HTTPException(
             status_code=500,
             detail="Unable to create consultation room",
@@ -833,11 +727,12 @@ async def create_consultation(payload: CreateConsultationRequest) -> CreateConsu
 async def validate_consultation_join(
     consultation_id: str,
     payload: ValidateJoinRequest,
+    session: AsyncSession = Depends(get_db),
 ) -> ValidateJoinResponse:
     """Upfront check for the prejoin step: confirms the consultation exists,
     hasn't ended/expired, and the participant/role pair is allowed to join.
     Does not mint a LiveKit token or touch the LiveKit API."""
-    consultation = get_consultation_or_404(consultation_id)
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
     ensure_role_allowed_for_consultation(
         consultation,
         participant_name=payload.participant_name,
@@ -846,11 +741,11 @@ async def validate_consultation_join(
 
     return ValidateJoinResponse(
         consultation_id=consultation_id,
-        room_name=consultation["room_name"],
+        room_name=consultation.room_name,
         participant_name=payload.participant_name,
         role=payload.role,
-        expires_at=consultation["expires_at"].isoformat(),
-        status=consultation["status"],
+        expires_at=consultation.expires_at.isoformat(),
+        status=consultation.status,
     )
 
 
@@ -858,9 +753,10 @@ async def validate_consultation_join(
 async def request_waiting_room(
     consultation_id: str,
     payload: WaitingRoomRequestPayload,
+    session: AsyncSession = Depends(get_db),
 ) -> WaitingRoomEntry:
     """Non-doctor participants request access to the consultation waiting room."""
-    consultation = get_consultation_or_404(consultation_id)
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
 
     if payload.role == "doctor":
         raise HTTPException(
@@ -877,31 +773,32 @@ async def request_waiting_room(
         role=payload.role,
     )
 
-    waiting_room: dict[str, dict] = consultation["waiting_room"]
-
     # If participant already has an entry, return its current state.
-    existing = waiting_room.get(payload.participant_name)
+    existing = await crud.get_waiting_room_entry(
+        session, consultation_id, payload.participant_name
+    )
     if existing is not None:
         return WaitingRoomEntry(
             participant_name=payload.participant_name,
-            role=existing["role"],
-            status=existing["status"],
-            requested_at=existing["requested_at"],
+            role=existing.role,
+            status=existing.status,
+            requested_at=existing.requested_at.isoformat(),
         )
 
     # Check if a doctor is already an active participant in the room.
-    doctor_present = await _is_doctor_in_room(consultation["room_name"])
+    doctor_present = await _is_doctor_in_room(consultation.room_name)
     status: WaitingRoomStatus = "admitted" if doctor_present else "waiting"
-    requested_at = utc_now().isoformat()
 
-    entry = {
-        "role": payload.role,
-        "status": status,
-        "requested_at": requested_at,
-    }
-    waiting_room[payload.participant_name] = entry
+    entry = await crud.create_waiting_room_entry(
+        session,
+        consultation_id=consultation_id,
+        participant_name=payload.participant_name,
+        role=payload.role,
+        status=status,
+    )
 
-    audit(
+    await crud.create_audit_event(
+        session,
         "waiting_room.requested",
         consultation_id=consultation_id,
         participant_name=payload.participant_name,
@@ -910,7 +807,8 @@ async def request_waiting_room(
     )
 
     if status == "admitted":
-        audit(
+        await crud.create_audit_event(
+            session,
             "waiting_room.admitted",
             consultation_id=consultation_id,
             participant_name=payload.participant_name,
@@ -922,27 +820,27 @@ async def request_waiting_room(
         participant_name=payload.participant_name,
         role=payload.role,
         status=status,
-        requested_at=requested_at,
+        requested_at=entry.requested_at.isoformat(),
     )
 
 
 @app.get("/api/consultations/{consultation_id}/waiting-room", response_model=list[WaitingRoomEntry])
 async def list_waiting_room(
     consultation_id: str,
+    session: AsyncSession = Depends(get_db),
 ) -> list[WaitingRoomEntry]:
     """Return all pending (waiting) entries — used by the doctor to poll."""
-    consultation = get_consultation_or_404(consultation_id)
-    waiting_room: dict[str, dict] = consultation["waiting_room"]
+    await crud.get_consultation_or_404(session, consultation_id)
+    entries = await crud.list_waiting_entries(session, consultation_id, status="waiting")
 
     return [
         WaitingRoomEntry(
-            participant_name=name,
-            role=entry["role"],
-            status=entry["status"],
-            requested_at=entry["requested_at"],
+            participant_name=entry.participant_name,
+            role=entry.role,
+            status=entry.status,
+            requested_at=entry.requested_at.isoformat(),
         )
-        for name, entry in waiting_room.items()
-        if entry["status"] == "waiting"
+        for entry in entries
     ]
 
 
@@ -951,9 +849,10 @@ async def admit_participant(
     consultation_id: str,
     participant_name: str,
     payload: WaitingRoomActionPayload,
+    session: AsyncSession = Depends(get_db),
 ) -> WaitingRoomEntry:
     """Doctor admits a waiting participant."""
-    consultation = get_consultation_or_404(consultation_id)
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
 
     if payload.actor_role != "doctor":
         raise HTTPException(status_code=403, detail="Only doctor can admit participants")
@@ -964,27 +863,28 @@ async def admit_participant(
         role=payload.actor_role,
     )
 
-    waiting_room: dict[str, dict] = consultation["waiting_room"]
-    entry = waiting_room.get(participant_name)
-
+    entry = await crud.get_waiting_room_entry(
+        session, consultation_id, participant_name, for_update=True
+    )
     if entry is None:
         raise HTTPException(status_code=404, detail="Participant not found in waiting room")
 
-    entry["status"] = "admitted"
+    await crud.set_waiting_room_status(session, entry, "admitted")
 
-    audit(
+    await crud.create_audit_event(
+        session,
         "waiting_room.admitted",
         consultation_id=consultation_id,
         participant_name=participant_name,
-        role=entry["role"],
+        role=entry.role,
         admitted_by=payload.actor_name,
     )
 
     return WaitingRoomEntry(
         participant_name=participant_name,
-        role=entry["role"],
+        role=entry.role,
         status="admitted",
-        requested_at=entry["requested_at"],
+        requested_at=entry.requested_at.isoformat(),
     )
 
 
@@ -993,9 +893,10 @@ async def deny_participant(
     consultation_id: str,
     participant_name: str,
     payload: WaitingRoomActionPayload,
+    session: AsyncSession = Depends(get_db),
 ) -> WaitingRoomEntry:
     """Doctor denies a waiting participant."""
-    consultation = get_consultation_or_404(consultation_id)
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
 
     if payload.actor_role != "doctor":
         raise HTTPException(status_code=403, detail="Only doctor can deny participants")
@@ -1006,27 +907,28 @@ async def deny_participant(
         role=payload.actor_role,
     )
 
-    waiting_room: dict[str, dict] = consultation["waiting_room"]
-    entry = waiting_room.get(participant_name)
-
+    entry = await crud.get_waiting_room_entry(
+        session, consultation_id, participant_name, for_update=True
+    )
     if entry is None:
         raise HTTPException(status_code=404, detail="Participant not found in waiting room")
 
-    entry["status"] = "denied"
+    await crud.set_waiting_room_status(session, entry, "denied")
 
-    audit(
+    await crud.create_audit_event(
+        session,
         "waiting_room.denied",
         consultation_id=consultation_id,
         participant_name=participant_name,
-        role=entry["role"],
+        role=entry.role,
         denied_by=payload.actor_name,
     )
 
     return WaitingRoomEntry(
         participant_name=participant_name,
-        role=entry["role"],
+        role=entry.role,
         status="denied",
-        requested_at=entry["requested_at"],
+        requested_at=entry.requested_at.isoformat(),
     )
 
 
@@ -1034,9 +936,10 @@ async def deny_participant(
 async def create_consultation_token(
     consultation_id: str,
     payload: TokenRequest,
+    session: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    consultation = get_consultation_or_404(consultation_id)
-    room_name = consultation["room_name"]
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    room_name = consultation.room_name
     ensure_role_allowed_for_consultation(
         consultation,
         participant_name=payload.participant_name,
@@ -1045,9 +948,10 @@ async def create_consultation_token(
 
     # Gate: non-doctor participants must be admitted via the waiting room.
     if payload.role != "doctor":
-        waiting_room: dict[str, dict] = consultation["waiting_room"]
-        wr_entry = waiting_room.get(payload.participant_name)
-        if wr_entry is None or wr_entry["status"] != "admitted":
+        wr_entry = await crud.get_waiting_room_entry(
+            session, consultation_id, payload.participant_name
+        )
+        if wr_entry is None or wr_entry.status != "admitted":
             raise HTTPException(
                 status_code=403,
                 detail={
@@ -1056,7 +960,7 @@ async def create_consultation_token(
                 },
             )
 
-    await ensure_room_exists_for_consultation(consultation)
+    await ensure_room_exists_for_consultation(session, consultation)
 
     token = build_token(
         consultation_id=consultation_id,
@@ -1065,7 +969,8 @@ async def create_consultation_token(
         role=payload.role,
     )
 
-    audit(
+    await crud.create_audit_event(
+        session,
         "token.issued",
         consultation_id=consultation_id,
         room_name=room_name,
@@ -1081,7 +986,7 @@ async def create_consultation_token(
         participant_name=payload.participant_name,
         role=payload.role,
         expires_in_seconds=TOKEN_TTL_SECONDS,
-        e2ee_key=consultation["e2ee_key"],
+        e2ee_key=consultation.e2ee_key,
     )
 
 
@@ -1092,14 +997,18 @@ async def create_consultation_token(
 async def end_consultation(
     consultation_id: str,
     payload: EndConsultationRequest,
+    session: AsyncSession = Depends(get_db),
 ) -> EndConsultationResponse:
-    consultation = get_consultation_or_404(consultation_id, include_ended=True)
+    consultation = await crud.get_consultation_or_404(
+        session, consultation_id, include_ended=True, for_update=True
+    )
     require_doctor_actor(consultation, payload)
 
-    if consultation["status"] == "ended":
+    if consultation.status == "ended":
         return _build_consultation_ended_response(consultation)
 
-    ended_at = _set_consultation_ended_state(
+    ended_at = await crud.set_consultation_ended_state(
+        session,
         consultation,
         ended_by=payload.participant_name,
     )
@@ -1107,12 +1016,13 @@ async def end_consultation(
     if ended_at is None:
         return _build_consultation_ended_response(consultation)
 
-    await terminate_room(consultation["room_name"])
+    await terminate_room(consultation.room_name)
 
-    audit(
+    await crud.create_audit_event(
+        session,
         "consultation.ended",
         consultation_id=consultation_id,
-        room_name=consultation["room_name"],
+        room_name=consultation.room_name,
         ended_by=payload.participant_name,
     )
 
@@ -1123,18 +1033,33 @@ async def end_consultation(
 async def livekit_webhook(
     request: Request,
     authorization: str = Header(None),
+    session: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    event = await _verify_and_parse_webhook(request, authorization)
+    event = await _verify_and_parse_webhook(session, request, authorization)
     if event is None:
         return {"status": "duplicate ignored"}
 
-    consultation = _resolve_consultation_from_event(event)
-    _handle_termination_if_applicable(event, consultation)
-    _record_webhook_audit(event, consultation)
+    consultation = await _resolve_consultation_from_event(session, event)
+    await _handle_termination_if_applicable(session, event, consultation)
+    await _record_webhook_audit(session, event, consultation)
 
     return {"status": "received"}
 
 
 @app.get("/api/audit-events")
-async def list_audit_events() -> list[dict[str, Any]]:
-    return audit_events[-MAX_AUDIT_EVENTS:]
+async def list_audit_events(session: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
+    events = await crud.list_audit_events(session, limit=AUDIT_EVENTS_LIMIT)
+
+    serialized: list[dict[str, Any]] = []
+    for event in events:
+        payload: dict[str, Any] = {
+            "timestamp": event.timestamp.isoformat(),
+            "event_type": event.event_type,
+        }
+        if event.consultation_id is not None:
+            payload["consultation_id"] = event.consultation_id
+        if event.details:
+            payload.update(event.details)
+        serialized.append(payload)
+
+    return serialized
