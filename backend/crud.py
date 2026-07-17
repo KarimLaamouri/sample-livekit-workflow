@@ -268,3 +268,9 @@ async def remember_webhook_event_id(session: AsyncSession, event_id: str) -> boo
     result = await session.execute(stmt)
     await session.flush()
     return result.rowcount > 0
+
+
+async def get_active_consultations(session: AsyncSession) -> list[Consultation]:
+    """Return all consultations with status='active'."""
+    stmt = select(Consultation).where(Consultation.status == "active")
+    return list((await session.execute(stmt)).scalars().all())

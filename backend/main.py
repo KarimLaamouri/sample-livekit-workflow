@@ -1,7 +1,9 @@
-﻿import json
+﻿import asyncio
+import json
 import logging
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -16,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import crud
-from database import get_db
+from database import AsyncSessionLocal, get_db
 from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel
 
 load_dotenv()
@@ -48,7 +50,54 @@ Role = Literal["doctor", "patient", "observer"]
 ConsultationStatus = Literal["active", "ended"]
 WaitingRoomStatus = Literal["waiting", "admitted", "denied"]
 
-app = FastAPI(title="Tachafy Teleconsultation Demo")
+
+async def background_sync_loop():
+    """Background task that periodically syncs consultations with LiveKit.
+    
+    This runs every 5 minutes and ensures the database stays synchronized with
+    the actual LiveKit room state, handling expirations and missing rooms.
+    """
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                try:
+                    result = await sync_consultations_with_livekit(session)
+                    logger.info(
+                        "Background sync completed: total_active=%d expired=%d synced=%d failed=%d",
+                        result["total_active"],
+                        result["expired"],
+                        result["synced"],
+                        result["failed"],
+                    )
+                    if result["errors"]:
+                        logger.warning("Background sync errors: %s", result["errors"])
+                except Exception as e:
+                    logger.exception("Background sync failed: %s", str(e))
+                    await session.rollback()
+        except Exception as e:
+            logger.exception("Background sync session creation failed: %s", str(e))
+        
+        # Sleep for 5 minutes before next sync
+        await asyncio.sleep(5 * 60)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage background tasks for the FastAPI application."""
+    # Startup: start the background sync task
+    sync_task = asyncio.create_task(background_sync_loop())
+    try:
+        yield
+    finally:
+        # Shutdown: cancel the background task
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Tachafy Teleconsultation Demo", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -506,6 +555,118 @@ async def terminate_room(room_name: str) -> None:
             room_name,
             livekit_api_url,
         )
+
+
+async def sync_consultations_with_livekit(session: AsyncSession) -> dict[str, Any]:
+    """Synchronize database consultation status with actual LiveKit room state.
+    
+    This function:
+    1. Handles hard expirations: if expires_at < utc_now(), terminates the room and marks as ended
+    2. Batches remaining active consultations into a single LiveKit API call
+    3. Compares LiveKit response against database to find missing rooms
+    
+    Returns a summary of the synchronization results.
+    """
+    active_consultations = await crud.get_active_consultations(session)
+    livekit_api_url = resolve_livekit_api_url()
+    
+    expired_count = 0
+    synced_count = 0
+    failed_count = 0
+    errors = []
+    
+    now = utc_now()
+    
+    # Step 1: Handle hard expirations
+    expired_consultations = [c for c in active_consultations if c.expires_at < now]
+    active_consultations = [c for c in active_consultations if c.expires_at >= now]
+    
+    for consultation in expired_consultations:
+        room_name = consultation.room_name
+        try:
+            # Terminate the room in LiveKit
+            await terminate_room(room_name)
+            
+            # Mark as ended in database
+            await crud.mark_consultation_ended_by_system(session, consultation)
+            expired_count += 1
+            
+            await crud.create_audit_event(
+                session,
+                "consultation.expired_terminated",
+                consultation_id=consultation.consultation_id,
+                room_name=room_name,
+                reason="hard_expiration",
+            )
+            
+            logger.info(
+                "Expired and terminated consultation: consultation_id=%s room_name=%s",
+                consultation.consultation_id,
+                room_name,
+            )
+        except Exception as e:
+            failed_count += 1
+            error_msg = f"Failed to expire consultation {room_name}: {str(e)}"
+            errors.append(error_msg)
+            logger.exception(
+                "Failed to expire consultation: consultation_id=%s room_name=%s",
+                consultation.consultation_id,
+                room_name,
+            )
+    
+    # Step 2: Batch check remaining active consultations against LiveKit
+    if active_consultations:
+        room_names = [c.room_name for c in active_consultations]
+        try:
+            async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+                response = await lkapi.room.list_rooms(api.ListRoomsRequest(names=room_names))
+                livekit_rooms = {room.name: room for room in getattr(response, "rooms", [])}
+                
+                # Find consultations whose rooms are missing from LiveKit
+                for consultation in active_consultations:
+                    room_name = consultation.room_name
+                    if room_name not in livekit_rooms:
+                        try:
+                            await crud.mark_consultation_ended_by_system(session, consultation)
+                            synced_count += 1
+                            
+                            await crud.create_audit_event(
+                                session,
+                                "consultation.synced_ended",
+                                consultation_id=consultation.consultation_id,
+                                room_name=room_name,
+                                reason="room_not_found_in_livekit",
+                            )
+                            
+                            logger.info(
+                                "Synced ended consultation: consultation_id=%s room_name=%s",
+                                consultation.consultation_id,
+                                room_name,
+                            )
+                        except Exception as e:
+                            failed_count += 1
+                            error_msg = f"Failed to sync ended consultation {room_name}: {str(e)}"
+                            errors.append(error_msg)
+                            logger.exception(
+                                "Failed to sync ended consultation: consultation_id=%s room_name=%s",
+                                consultation.consultation_id,
+                                room_name,
+                            )
+        except Exception as e:
+            failed_count += len(active_consultations)
+            error_msg = f"Failed to batch check LiveKit rooms: {str(e)}"
+            errors.append(error_msg)
+            logger.exception("Failed to batch check LiveKit rooms")
+    
+    await session.commit()
+    
+    return {
+        "total_active": len(active_consultations) + len(expired_consultations),
+        "expired": expired_count,
+        "synced": synced_count,
+        "failed": failed_count,
+        "errors": errors,
+    }
 
 
 async def _is_doctor_in_room(room_name: str) -> bool:
