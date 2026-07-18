@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -31,6 +32,7 @@ class Consultation(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     waiting_room_entries: Mapped[list["WaitingRoomEntry"]] = relationship(
         back_populates="consultation",

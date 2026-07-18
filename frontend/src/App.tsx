@@ -62,6 +62,17 @@ type WaitingRoomEntryData = {
   requested_at: string;
 };
 
+type ParticipantInfo = {
+  participant_id: string;
+  identity: string;
+  role: string | null;
+  name: string | null;
+  state: string | null;
+  joined_at: string | null;
+  is_publisher: boolean | null;
+  tracks: Array<{ type: string; source: string; muted: boolean }> | null;
+};
+
 const parseApiError = async (response: Response): Promise<ApiError> => {
   let detail: unknown = null;
 
@@ -186,11 +197,18 @@ type CallViewProps = {
   busy: boolean;
   consultationId: string;
   doctorName: string;
+  locked: boolean;
+  participants: ParticipantInfo[];
   onRequestJoinToken: (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => Promise<void>;
   onEndConsultation: () => void;
   onLeaveCall: () => void;
   onReturnToJoinForm: () => void;
   onStageChange: (stage: 'preview' | 'connecting' | 'call' | null) => void;
+  onLockConsultation: () => Promise<void>;
+  onUnlockConsultation: () => Promise<void>;
+  onListParticipants: () => Promise<void>;
+  onRemoveParticipant: (identity: string) => Promise<void>;
+  onMuteParticipant: (identity: string) => Promise<void>;
 };
 
 type ConsultationController = {
@@ -207,6 +225,8 @@ type ConsultationController = {
   busy: boolean;
   waitingForAdmission: boolean;
   waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | null;
+  locked: boolean;
+  participants: ParticipantInfo[];
   setCallStage: (stage: 'preview' | 'connecting' | 'call' | null) => void;
   setDoctorName: (value: string) => void;
   setPatientName: (value: string) => void;
@@ -222,6 +242,11 @@ type ConsultationController = {
   leaveCall: () => void;
   returnToJoinForm: () => void;
   cancelWaiting: () => void;
+  lockConsultation: () => Promise<void>;
+  unlockConsultation: () => Promise<void>;
+  listParticipants: () => Promise<void>;
+  removeParticipant: (identity: string) => Promise<void>;
+  muteParticipant: (identity: string) => Promise<void>;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -289,6 +314,8 @@ function useConsultation(): ConsultationController {
   const [busy, setBusy] = useState(false);
   const [waitingForAdmission, setWaitingForAdmission] = useState(false);
   const [waitingRoomStatus, setWaitingRoomStatus] = useState<'waiting' | 'admitted' | 'denied' | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
 
   const markConsultationEnded = useCallback((endedAt: string, notice: ErrorNotice) => {
     setConsultation((current) => {
@@ -453,6 +480,143 @@ function useConsultation(): ConsultationController {
     setWaitingRoomStatus(null);
     setStatus('Join the consultation again from the form.');
   }, []);
+
+  const lockConsultation = useCallback(async () => {
+    if (!joinState || !consultationId.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setErrorNotice(null);
+
+    try {
+      await requestJson<{ consultation_id: string; locked: boolean }>(
+        `${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/lock`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
+        },
+      );
+
+      setLocked(true);
+    } catch (e) {
+      setErrorNotice(createErrorNotice(e, 'Locking the consultation'));
+    } finally {
+      setBusy(false);
+    }
+  }, [consultationId, joinState, requestJson]);
+
+  const unlockConsultation = useCallback(async () => {
+    if (!joinState || !consultationId.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setErrorNotice(null);
+
+    try {
+      await requestJson<{ consultation_id: string; locked: boolean }>(
+        `${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/unlock`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
+        },
+      );
+
+      setLocked(false);
+    } catch (e) {
+      setErrorNotice(createErrorNotice(e, 'Unlocking the consultation'));
+    } finally {
+      setBusy(false);
+    }
+  }, [consultationId, joinState, requestJson]);
+
+  const listParticipants = useCallback(async () => {
+    if (!joinState || !consultationId.trim()) {
+      return;
+    }
+
+    try {
+      const response = await requestJson<ParticipantInfo[]>(
+        `${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/participants`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
+        },
+      );
+
+      setParticipants(response);
+    } catch (e) {
+      // Silently fail on participant list errors
+    }
+  }, [consultationId, joinState, requestJson]);
+
+  const removeParticipant = useCallback(async (identity: string) => {
+    if (!joinState || !consultationId.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setErrorNotice(null);
+
+    try {
+      await requestJson<{ status: string }>(
+        `${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/participants/${encodeURIComponent(identity)}/remove`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
+        },
+      );
+
+      // Refresh participant list
+      void listParticipants();
+    } catch (e) {
+      setErrorNotice(createErrorNotice(e, 'Removing participant'));
+    } finally {
+      setBusy(false);
+    }
+  }, [consultationId, joinState, requestJson, listParticipants]);
+
+  const muteParticipant = useCallback(async (identity: string) => {
+    if (!joinState || !consultationId.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setErrorNotice(null);
+
+    try {
+      await requestJson<{ status: string; tracks_muted: number }>(
+        `${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/participants/${encodeURIComponent(identity)}/mute`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
+        },
+      );
+
+      // Refresh participant list
+      void listParticipants();
+    } catch (e) {
+      setErrorNotice(createErrorNotice(e, 'Muting participant'));
+    } finally {
+      setBusy(false);
+    }
+  }, [consultationId, joinState, requestJson, listParticipants]);
 
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
@@ -670,6 +834,8 @@ function useConsultation(): ConsultationController {
     busy,
     waitingForAdmission,
     waitingRoomStatus,
+    locked,
+    participants,
     setCallStage,
     setDoctorName,
     setPatientName,
@@ -685,6 +851,11 @@ function useConsultation(): ConsultationController {
     leaveCall,
     returnToJoinForm,
     cancelWaiting,
+    lockConsultation,
+    unlockConsultation,
+    listParticipants,
+    removeParticipant,
+    muteParticipant,
   };
 }
 
@@ -1021,17 +1192,78 @@ function WaitingRoomPanel({
   );
 }
 
+function ParticipantsPanel({
+  participants,
+  onRemoveParticipant,
+  onMuteParticipant,
+}: {
+  participants: ParticipantInfo[];
+  onRemoveParticipant: (identity: string) => Promise<void>;
+  onMuteParticipant: (identity: string) => Promise<void>;
+}) {
+  if (participants.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="participants-panel">
+      <div className="participants-panel-header">
+        <h3>Participants</h3>
+        <span className="participants-badge">{participants.length}</span>
+      </div>
+      <div className="participants-list">
+        {participants.map((participant) => (
+          <div key={participant.identity} className="participant-entry">
+            <div className="participant-entry-info">
+              <span className="participant-entry-name">{participant.name || participant.identity}</span>
+              <span className="participant-entry-role">{participant.role || 'unknown'}</span>
+              <span className={`participant-entry-state ${participant.state || ''}`}>
+                {participant.state || 'unknown'}
+              </span>
+            </div>
+            <div className="participant-entry-actions">
+              <button
+                type="button"
+                className="mute-button"
+                onClick={() => void onMuteParticipant(participant.identity)}
+                title="Mute participant"
+              >
+                🔇
+              </button>
+              <button
+                type="button"
+                className="remove-button"
+                onClick={() => void onRemoveParticipant(participant.identity)}
+                title="Remove participant"
+              >
+                🚫
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CallView({
   joinState,
   consultationExpiresAt,
   busy,
   consultationId,
   doctorName,
+  locked,
+  participants,
   onRequestJoinToken,
   onEndConsultation,
   onLeaveCall,
   onReturnToJoinForm,
   onStageChange,
+  onLockConsultation,
+  onUnlockConsultation,
+  onListParticipants,
+  onRemoveParticipant,
+  onMuteParticipant,
 }: CallViewProps) {
   const { room, keyProvider } = useMemo(() => {
     const keyProvider = new ExternalE2EEKeyProvider();
@@ -1070,6 +1302,20 @@ function CallView({
   }, [onStageChange, stage]);
 
   useEffect(() => () => onStageChange(null), [onStageChange]);
+
+  // Poll participants when in call stage and role is doctor
+  useEffect(() => {
+    if (stage !== 'call' || joinState.role !== 'doctor') {
+      return;
+    }
+
+    void onListParticipants();
+    const intervalId = window.setInterval(() => {
+      void onListParticipants();
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, [stage, joinState.role, onListParticipants]);
 
   useEffect(() => {
     if (!joinState.token || !joinState.expiresInSeconds || !joinState.tokenIssuedAt) {
@@ -1322,13 +1568,30 @@ function CallView({
         </div>
         <div className="call-strip-actions">
           {joinState.role === 'doctor' && (
-            <button type="button" className="end-button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
+            <>
+              <button 
+                type="button" 
+                className={`lock-button ${locked ? 'locked' : ''}`} 
+                onClick={() => locked ? void onUnlockConsultation() : void onLockConsultation()} 
+                disabled={busy}
+              >
+                {locked ? '🔒 Unlock' : '🔓 Lock'}
+              </button>
+              <button type="button" className="end-button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
+            </>
           )}
           <button type="button" className="leave-button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
         </div>
       </div>
       {joinState.role === 'doctor' && (
-        <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
+        <>
+          <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
+          <ParticipantsPanel 
+            participants={participants} 
+            onRemoveParticipant={onRemoveParticipant}
+            onMuteParticipant={onMuteParticipant}
+          />
+        </>
       )}
       {connectionNotice && (
         <NoticeCard
@@ -1391,6 +1654,8 @@ function App() {
     busy,
     waitingForAdmission,
     waitingRoomStatus,
+    locked,
+    participants,
     setCallStage,
     setDoctorName,
     setPatientName,
@@ -1406,6 +1671,11 @@ function App() {
     leaveCall,
     returnToJoinForm,
     cancelWaiting,
+    lockConsultation,
+    unlockConsultation,
+    listParticipants,
+    removeParticipant,
+    muteParticipant,
   } = useConsultation();
 
   const handleWaitingRoomAdmitted = useCallback(() => {
@@ -1435,11 +1705,18 @@ function App() {
         busy={busy}
         consultationId={consultationId}
         doctorName={doctorName}
+        locked={locked}
+        participants={participants}
         onRequestJoinToken={joinConsultation}
         onEndConsultation={endConsultation}
         onLeaveCall={leaveCall}
         onReturnToJoinForm={returnToJoinForm}
         onStageChange={setCallStage}
+        onLockConsultation={lockConsultation}
+        onUnlockConsultation={unlockConsultation}
+        onListParticipants={listParticipants}
+        onRemoveParticipant={removeParticipant}
+        onMuteParticipant={muteParticipant}
       />
     );
   }

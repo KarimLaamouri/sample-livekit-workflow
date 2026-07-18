@@ -183,6 +183,27 @@ class WaitingRoomActionPayload(BaseModel):
     actor_role: Role
 
 
+class ModerationActionPayload(BaseModel):
+    participant_name: str = Field(min_length=1, max_length=80)
+    role: Role
+
+
+class LockConsultationResponse(BaseModel):
+    consultation_id: str
+    locked: bool
+
+
+class ParticipantInfo(BaseModel):
+    participant_id: str
+    identity: str
+    role: str | None
+    name: str | None
+    state: str | None
+    joined_at: str | None
+    is_publisher: bool | None
+    tracks: list[dict[str, Any]] | None
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -521,6 +542,20 @@ def require_doctor_actor(consultation: Consultation, payload: EndConsultationReq
         consultation,
         participant_name=payload.participant_name,
         role=payload.role,
+    )
+
+
+def require_doctor_for_moderation(
+    consultation: Consultation, participant_name: str, role: Role
+) -> None:
+    """Check that the actor is the assigned doctor for moderation actions."""
+    if role != "doctor":
+        raise HTTPException(status_code=403, detail="Only doctor can perform moderation actions")
+
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=participant_name,
+        role=role,
     )
 
 
@@ -1052,6 +1087,16 @@ async def create_consultation_token(
                 },
             )
 
+    # Gate: if consultation is locked, only doctors can join
+    if consultation.locked and payload.role != "doctor":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ROOM_LOCKED",
+                "message": "The consultation room is locked. Only the doctor can join at this time.",
+            },
+        )
+
     await ensure_room_active_for_consultation(session, consultation)
 
     token = build_token(
@@ -1119,6 +1164,215 @@ async def end_consultation(
     )
 
     return _build_consultation_ended_response(consultation)
+
+
+@app.post(
+    "/api/consultations/{consultation_id}/lock",
+    response_model=LockConsultationResponse,
+)
+async def lock_consultation(
+    consultation_id: str,
+    payload: ModerationActionPayload,
+    session: AsyncSession = Depends(get_db),
+) -> LockConsultationResponse:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
+
+    consultation.locked = True
+    await session.flush()
+
+    await crud.create_audit_event(
+        session,
+        "consultation.locked",
+        consultation_id=consultation_id,
+        room_name=consultation.room_name,
+        locked_by=payload.participant_name,
+    )
+
+    return LockConsultationResponse(
+        consultation_id=consultation_id,
+        locked=True,
+    )
+
+
+@app.post(
+    "/api/consultations/{consultation_id}/unlock",
+    response_model=LockConsultationResponse,
+)
+async def unlock_consultation(
+    consultation_id: str,
+    payload: ModerationActionPayload,
+    session: AsyncSession = Depends(get_db),
+) -> LockConsultationResponse:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
+
+    consultation.locked = False
+    await session.flush()
+
+    await crud.create_audit_event(
+        session,
+        "consultation.unlocked",
+        consultation_id=consultation_id,
+        room_name=consultation.room_name,
+        unlocked_by=payload.participant_name,
+    )
+
+    return LockConsultationResponse(
+        consultation_id=consultation_id,
+        locked=False,
+    )
+
+
+@app.get(
+    "/api/consultations/{consultation_id}/participants",
+    response_model=list[ParticipantInfo],
+)
+async def list_participants(
+    consultation_id: str,
+    payload: ModerationActionPayload,
+    session: AsyncSession = Depends(get_db),
+) -> list[ParticipantInfo]:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
+
+    livekit_api_url = resolve_livekit_api_url()
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            participants = await lkapi.room.list_participants(
+                api.ListParticipantsRequest(room=consultation.room_name)
+            )
+            
+            participant_infos = []
+            for participant in participants.participants:
+                participant_data = _build_participant_audit_data_from_participant(participant)
+                if participant_data:
+                    participant_infos.append(ParticipantInfo(**participant_data))
+            
+            return participant_infos
+    except Exception:
+        logger.exception(
+            "Failed to list participants: consultation_id=%s room_name=%s",
+            consultation_id,
+            consultation.room_name,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to list participants",
+        )
+
+
+@app.post("/api/consultations/{consultation_id}/participants/{identity}/remove")
+async def remove_participant(
+    consultation_id: str,
+    identity: str,
+    payload: ModerationActionPayload,
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
+
+    livekit_api_url = resolve_livekit_api_url()
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            await lkapi.room.remove_participant(
+                api.RoomParticipantIdentity(room=consultation.room_name, identity=identity)
+            )
+        
+        await crud.create_audit_event(
+            session,
+            "participant.removed_by_host",
+            consultation_id=consultation_id,
+            room_name=consultation.room_name,
+            removed_by=payload.participant_name,
+            target_identity=identity,
+        )
+        
+        return {"status": "removed"}
+    except Exception:
+        logger.exception(
+            "Failed to remove participant: consultation_id=%s identity=%s",
+            consultation_id,
+            identity,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to remove participant",
+        )
+
+
+@app.post("/api/consultations/{consultation_id}/participants/{identity}/mute")
+async def mute_participant(
+    consultation_id: str,
+    identity: str,
+    payload: ModerationActionPayload,
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
+
+    livekit_api_url = resolve_livekit_api_url()
+    try:
+        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
+            # First, list participants to get the target participant's tracks
+            participants = await lkapi.room.list_participants(
+                api.ListParticipantsRequest(room=consultation.room_name)
+            )
+            
+            target_participant = None
+            for participant in participants.participants:
+                if participant.identity == identity:
+                    target_participant = participant
+                    break
+            
+            if not target_participant:
+                raise HTTPException(status_code=404, detail="Participant not found")
+            
+            # Mute all published tracks for the participant
+            muted_count = 0
+            if hasattr(target_participant, 'tracks') and target_participant.tracks:
+                for track in target_participant.tracks:
+                    try:
+                        await lkapi.room.mute_published_track(
+                            api.MuteRoomTrackRequest(
+                                room=consultation.room_name,
+                                identity=identity,
+                                track_sid=track.sid,
+                                muted=True,
+                            )
+                        )
+                        muted_count += 1
+                    except Exception:
+                        logger.warning(
+                            "Failed to mute track: consultation_id=%s identity=%s track_sid=%s",
+                            consultation_id,
+                            identity,
+                            track.sid,
+                        )
+        
+        await crud.create_audit_event(
+            session,
+            "participant.muted_by_host",
+            consultation_id=consultation_id,
+            room_name=consultation.room_name,
+            muted_by=payload.participant_name,
+            target_identity=identity,
+            tracks_muted=muted_count,
+        )
+        
+        return {"status": "muted", "tracks_muted": muted_count}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to mute participant: consultation_id=%s identity=%s",
+            consultation_id,
+            identity,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to mute participant",
+        )
 
 
 @app.post("/api/webhooks")
