@@ -63,10 +63,9 @@ async def background_sync_loop():
                 try:
                     result = await sync_consultations_with_livekit(session)
                     logger.info(
-                        "Background sync completed: total_active=%d expired=%d synced=%d failed=%d",
+                        "Background sync completed: total_active=%d expired=%d failed=%d",
                         result["total_active"],
                         result["expired"],
-                        result["synced"],
                         result["failed"],
                     )
                     if result["errors"]:
@@ -392,11 +391,9 @@ async def _resolve_consultation_from_event(
 async def _handle_termination_if_applicable(
     session: AsyncSession, event: Any, consultation: Consultation | None
 ) -> None:
-    if consultation is None:
-        return
-
-    if _is_room_termination_event(getattr(event, "event", "unknown")):
-        await crud.mark_consultation_ended_by_system(session, consultation)
+    # Webhook room termination events are now expected ephemeral behavior
+    # and must not kill the database record. This function is a no-op.
+    pass
 
 
 def _build_track_labels(track: Any) -> tuple[str | None, str | None, dict[str, Any] | None]:
@@ -560,26 +557,22 @@ async def terminate_room(room_name: str) -> None:
 async def sync_consultations_with_livekit(session: AsyncSession) -> dict[str, Any]:
     """Synchronize database consultation status with actual LiveKit room state.
     
-    This function:
-    1. Handles hard expirations: if expires_at < utc_now(), terminates the room and marks as ended
-    2. Batches remaining active consultations into a single LiveKit API call
-    3. Compares LiveKit response against database to find missing rooms
+    This function handles hard expirations: if expires_at < utc_now(), terminates the room
+    and marks as ended. Missing rooms from LiveKit are not considered errors since rooms
+    spin down dynamically and can be JIT provisioned on join.
     
     Returns a summary of the synchronization results.
     """
     active_consultations = await crud.get_active_consultations(session)
-    livekit_api_url = resolve_livekit_api_url()
     
     expired_count = 0
-    synced_count = 0
     failed_count = 0
     errors = []
     
     now = utc_now()
     
-    # Step 1: Handle hard expirations
+    # Handle hard expirations
     expired_consultations = [c for c in active_consultations if c.expires_at < now]
-    active_consultations = [c for c in active_consultations if c.expires_at >= now]
     
     for consultation in expired_consultations:
         room_name = consultation.room_name
@@ -614,56 +607,11 @@ async def sync_consultations_with_livekit(session: AsyncSession) -> dict[str, An
                 room_name,
             )
     
-    # Step 2: Batch check remaining active consultations against LiveKit
-    if active_consultations:
-        room_names = [c.room_name for c in active_consultations]
-        try:
-            async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
-                response = await lkapi.room.list_rooms(api.ListRoomsRequest(names=room_names))
-                livekit_rooms = {room.name: room for room in getattr(response, "rooms", [])}
-                
-                # Find consultations whose rooms are missing from LiveKit
-                for consultation in active_consultations:
-                    room_name = consultation.room_name
-                    if room_name not in livekit_rooms:
-                        try:
-                            await crud.mark_consultation_ended_by_system(session, consultation)
-                            synced_count += 1
-                            
-                            await crud.create_audit_event(
-                                session,
-                                "consultation.synced_ended",
-                                consultation_id=consultation.consultation_id,
-                                room_name=room_name,
-                                reason="room_not_found_in_livekit",
-                            )
-                            
-                            logger.info(
-                                "Synced ended consultation: consultation_id=%s room_name=%s",
-                                consultation.consultation_id,
-                                room_name,
-                            )
-                        except Exception as e:
-                            failed_count += 1
-                            error_msg = f"Failed to sync ended consultation {room_name}: {str(e)}"
-                            errors.append(error_msg)
-                            logger.exception(
-                                "Failed to sync ended consultation: consultation_id=%s room_name=%s",
-                                consultation.consultation_id,
-                                room_name,
-                            )
-        except Exception as e:
-            failed_count += len(active_consultations)
-            error_msg = f"Failed to batch check LiveKit rooms: {str(e)}"
-            errors.append(error_msg)
-            logger.exception("Failed to batch check LiveKit rooms")
-    
     await session.commit()
     
     return {
-        "total_active": len(active_consultations) + len(expired_consultations),
+        "total_active": len(active_consultations),
         "expired": expired_count,
-        "synced": synced_count,
         "failed": failed_count,
         "errors": errors,
     }
@@ -710,7 +658,7 @@ def grants_for(role: Role, room_name: str) -> api.VideoGrants:
     )
 
 
-async def ensure_room_exists_for_consultation(
+async def ensure_room_active_for_consultation(
     session: AsyncSession, consultation: Consultation
 ) -> None:
     room_name = consultation.room_name
@@ -720,31 +668,52 @@ async def ensure_room_exists_for_consultation(
         async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
             response = await lkapi.room.list_rooms(api.ListRoomsRequest(names=[room_name]))
             if not getattr(response, "rooms", []):
-                await crud.mark_consultation_ended_by_system(session, consultation)
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "CONSULTATION_ENDED",
-                        "message": "Consultation room no longer exists",
+                # Room doesn't exist, dynamically recreate it with JIT provisioning
+                room_metadata = json.dumps(
+                    {
+                        "consultation_id": consultation.consultation_id,
+                        "doctor_name": consultation.doctor_name,
+                        "patient_name": consultation.patient_name,
                     },
+                    separators=(",", ":"),
                 )
-    except HTTPException:
-        raise
+                
+                await lkapi.room.create_room(
+                    api.CreateRoomRequest(
+                        name=room_name,
+                        empty_timeout=600,
+                        departure_timeout=120,
+                        metadata=room_metadata,
+                    )
+                )
+                
+                await crud.create_audit_event(
+                    session,
+                    "consultation.room_jit_created",
+                    consultation_id=consultation.consultation_id,
+                    room_name=room_name,
+                )
+                
+                logger.info(
+                    "JIT provisioned room: consultation_id=%s room_name=%s",
+                    consultation.consultation_id,
+                    room_name,
+                )
     except Exception:
         await crud.create_audit_event(
             session,
-            "consultation.room_existence_check_failed",
+            "consultation.room_provisioning_failed",
             consultation_id=consultation.consultation_id,
             room_name=room_name,
         )
         logger.exception(
-            "Failed to verify consultation room state: consultation_id=%s room_name=%s",
+            "Failed to ensure room is active: consultation_id=%s room_name=%s",
             consultation.consultation_id,
             room_name,
         )
         raise HTTPException(
             status_code=500,
-            detail="Unable to verify consultation room state",
+            detail="Unable to ensure room is active",
         )
 
 
@@ -816,14 +785,6 @@ async def create_consultation(
     room_name = f"tachafy-{consultation_id}"
     e2ee_key = secrets.token_urlsafe(32)
     expires_at = utc_now() + timedelta(minutes=CONSULTATION_TTL_MINUTES)
-    room_metadata = json.dumps(
-        {
-            "consultation_id": consultation_id,
-            "doctor_name": payload.doctor_name,
-            "patient_name": payload.patient_name,
-        },
-        separators=(",", ":"),
-    )
 
     await crud.create_consultation(
         session,
@@ -843,36 +804,6 @@ async def create_consultation(
         doctor_name=payload.doctor_name,
         patient_name=payload.patient_name,
     )
-
-    livekit_api_url = resolve_livekit_api_url()
-    try:
-        async with api.LiveKitAPI(url=livekit_api_url) as lkapi:
-            await lkapi.room.create_room(
-                api.CreateRoomRequest(
-                    name=room_name,
-                    departure_timeout=DEPARTURE_TIMEOUT,
-                    metadata=room_metadata,
-                )
-            )
-    except Exception as exc:
-        # Discard the not-yet-committed consultation + "created" audit row,
-        # then persist a fresh failure record on its own so the audit trail
-        # survives even though the consultation itself never comes into
-        # existence (mirrors the old dict.pop(consultation_id) behavior).
-        await session.rollback()
-        await crud.create_audit_event(
-            session,
-            "consultation.room_creation_failed",
-            consultation_id=consultation_id,
-            room_name=room_name,
-            livekit_api_url=livekit_api_url,
-            error=str(exc),
-        )
-        await session.commit()
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to create consultation room",
-        )
 
     return CreateConsultationResponse(
         consultation_id=consultation_id,
@@ -1121,7 +1052,7 @@ async def create_consultation_token(
                 },
             )
 
-    await ensure_room_exists_for_consultation(session, consultation)
+    await ensure_room_active_for_consultation(session, consultation)
 
     token = build_token(
         consultation_id=consultation_id,
