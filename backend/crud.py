@@ -125,6 +125,19 @@ async def set_consultation_ended_state(
     return ended_at.isoformat()
 
 
+async def set_consultation_locked(
+    session: AsyncSession, consultation: Consultation, locked: bool
+) -> bool:
+    """Idempotent. Returns False (no-op) if consultation.locked is
+    already in the requested state, True if it changed — mirrors the
+    early-return style of set_consultation_ended_state."""
+    if consultation.locked == locked:
+        return False
+    consultation.locked = locked
+    await session.flush()
+    return True
+
+
 async def mark_consultation_ended_by_system(
     session: AsyncSession, consultation: Consultation
 ) -> bool:

@@ -138,6 +138,51 @@ const createErrorNotice = (error: unknown, actionLabel: string): ErrorNotice => 
     }
 
     if (apiError.status === 403) {
+      if (apiError.code === 'ROOM_LOCKED') {
+        return {
+          title: 'Room locked',
+          message: apiError.message || 'The consultation room is locked. Only the doctor can join at this time.',
+          suggestion: 'Contact the doctor to unlock the room if you need to join.',
+          status: apiError.status,
+        };
+      }
+
+      if (apiError.code === 'NOT_ADMITTED') {
+        return {
+          title: 'Not admitted',
+          message: apiError.message || 'You have not been admitted to this consultation. Please request access via the waiting room.',
+          suggestion: 'Request access through the waiting room and wait for the doctor to admit you.',
+          status: apiError.status,
+        };
+      }
+
+      if (apiError.code === 'DOCTOR_BYPASS') {
+        return {
+          title: 'Doctor bypass',
+          message: apiError.message || 'Doctors do not use the waiting room.',
+          suggestion: 'Doctors can join directly without using the waiting room.',
+          status: apiError.status,
+        };
+      }
+
+      if (apiError.code === 'NOT_ASSIGNED_DOCTOR') {
+        return {
+          title: 'Not assigned as doctor',
+          message: apiError.message || 'Participant is not assigned as doctor',
+          suggestion: 'Ensure your participant name matches the doctor name for this consultation.',
+          status: apiError.status,
+        };
+      }
+
+      if (apiError.code === 'NOT_ASSIGNED_PATIENT') {
+        return {
+          title: 'Not assigned as patient',
+          message: apiError.message || 'Participant is not assigned as patient',
+          suggestion: 'Ensure your participant name matches the patient name for this consultation.',
+          status: apiError.status,
+        };
+      }
+
       return {
         title: 'Access denied',
         message: apiError.message,
@@ -202,7 +247,7 @@ type CallViewProps = {
   onRequestJoinToken: (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => Promise<void>;
   onEndConsultation: () => void;
   onLeaveCall: () => void;
-  onReturnToJoinForm: () => void;
+  onReturnToJoinForm: (errorNotice?: ErrorNotice) => void;
   onStageChange: (stage: 'preview' | 'connecting' | 'call' | null) => void;
   onLockConsultation: () => Promise<void>;
   onUnlockConsultation: () => Promise<void>;
@@ -473,12 +518,15 @@ function useConsultation(): ConsultationController {
     setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
   }, []);
 
-  const returnToJoinForm = useCallback(() => {
+  const returnToJoinForm = useCallback((errorNotice?: ErrorNotice) => {
     setJoinState(null);
     setCallStage(null);
     setWaitingForAdmission(false);
     setWaitingRoomStatus(null);
     setStatus('Join the consultation again from the form.');
+    if (errorNotice) {
+      setErrorNotice(errorNotice);
+    }
   }, []);
 
   const lockConsultation = useCallback(async () => {
@@ -1355,7 +1403,7 @@ function CallView({
       setConnectionNotice(notice);
       setConnectionAction(apiStatus === 404 || apiStatus === 409 || apiStatus === 410 || apiStatus === 403
         ? () => {
-          onReturnToJoinForm();
+          setTimeout(() => onReturnToJoinForm(notice), 0);
         }
         : () => {
           setStage('connecting');
@@ -1433,8 +1481,9 @@ function CallView({
             });
           });
         } else {
-          setConnectionNotice(createErrorNotice(error, 'Connecting to the consultation room'));
-          setConnectionAction(() => onReturnToJoinForm);
+          const notice = createErrorNotice(error, 'Connecting to the consultation room');
+          setConnectionNotice(notice);
+          setConnectionAction(() => () => onReturnToJoinForm(notice));
         }
 
         setStage('preview');

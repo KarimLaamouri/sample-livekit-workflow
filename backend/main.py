@@ -198,8 +198,10 @@ class ParticipantInfo(BaseModel):
     identity: str
     role: str | None
     name: str | None
+    tag: str | None = None
     state: str | None
     joined_at: str | None
+    metadata: dict[str, Any] | None = None
     is_publisher: bool | None
     tracks: list[dict[str, Any]] | None
 
@@ -528,10 +530,22 @@ def ensure_role_allowed_for_consultation(
     role: Role,
 ) -> None:
     if role == "doctor" and participant_name != consultation.doctor_name:
-        raise HTTPException(status_code=403, detail="Participant is not assigned as doctor")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "NOT_ASSIGNED_DOCTOR",
+                "message": "Participant is not assigned as doctor",
+            },
+        )
 
     if role == "patient" and participant_name != consultation.patient_name:
-        raise HTTPException(status_code=403, detail="Participant is not assigned as patient")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "NOT_ASSIGNED_PATIENT",
+                "message": "Participant is not assigned as patient",
+            },
+        )
 
 
 def require_doctor_actor(consultation: Consultation, payload: EndConsultationRequest) -> None:
@@ -680,7 +694,7 @@ def grants_for(role: Role, room_name: str) -> api.VideoGrants:
             can_publish=False,
             can_subscribe=True,
             can_publish_data=False,
-            hidden=False,
+            hidden=True,  # Reverted from False to match original behavior
         )
 
     return api.VideoGrants(
@@ -1175,19 +1189,20 @@ async def lock_consultation(
     payload: ModerationActionPayload,
     session: AsyncSession = Depends(get_db),
 ) -> LockConsultationResponse:
-    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    consultation = await crud.get_consultation_or_404(
+        session, consultation_id, for_update=True
+    )
     require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
-    consultation.locked = True
-    await session.flush()
-
-    await crud.create_audit_event(
-        session,
-        "consultation.locked",
-        consultation_id=consultation_id,
-        room_name=consultation.room_name,
-        locked_by=payload.participant_name,
-    )
+    changed = await crud.set_consultation_locked(session, consultation, locked=True)
+    if changed:
+        await crud.create_audit_event(
+            session,
+            "consultation.locked",
+            consultation_id=consultation_id,
+            room_name=consultation.room_name,
+            locked_by=payload.participant_name,
+        )
 
     return LockConsultationResponse(
         consultation_id=consultation_id,
@@ -1204,19 +1219,20 @@ async def unlock_consultation(
     payload: ModerationActionPayload,
     session: AsyncSession = Depends(get_db),
 ) -> LockConsultationResponse:
-    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    consultation = await crud.get_consultation_or_404(
+        session, consultation_id, for_update=True
+    )
     require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
-    consultation.locked = False
-    await session.flush()
-
-    await crud.create_audit_event(
-        session,
-        "consultation.unlocked",
-        consultation_id=consultation_id,
-        room_name=consultation.room_name,
-        unlocked_by=payload.participant_name,
-    )
+    changed = await crud.set_consultation_locked(session, consultation, locked=False)
+    if changed:
+        await crud.create_audit_event(
+            session,
+            "consultation.unlocked",
+            consultation_id=consultation_id,
+            room_name=consultation.room_name,
+            unlocked_by=payload.participant_name,
+        )
 
     return LockConsultationResponse(
         consultation_id=consultation_id,
@@ -1224,7 +1240,7 @@ async def unlock_consultation(
     )
 
 
-@app.get(
+@app.post(
     "/api/consultations/{consultation_id}/participants",
     response_model=list[ParticipantInfo],
 )
@@ -1269,7 +1285,9 @@ async def remove_participant(
     payload: ModerationActionPayload,
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    consultation = await crud.get_consultation_or_404(
+        session, consultation_id, for_update=True
+    )
     require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     livekit_api_url = resolve_livekit_api_url()
@@ -1308,7 +1326,9 @@ async def mute_participant(
     payload: ModerationActionPayload,
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    consultation = await crud.get_consultation_or_404(
+        session, consultation_id, for_update=True
+    )
     require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     livekit_api_url = resolve_livekit_api_url()
