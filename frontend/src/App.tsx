@@ -7,6 +7,7 @@ import {
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { ExternalE2EEKeyProvider, Room } from 'livekit-client';
+import { MicOff, UserX } from 'lucide-react';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -1275,16 +1276,18 @@ function ParticipantsPanel({
                 className="mute-button"
                 onClick={() => void onMuteParticipant(participant.identity)}
                 title="Mute participant"
+                aria-label="Mute participant"
               >
-                🔇
+                <MicOff size={14} strokeWidth={2.25} />
               </button>
               <button
                 type="button"
                 className="remove-button"
                 onClick={() => void onRemoveParticipant(participant.identity)}
                 title="Remove participant"
+                aria-label="Remove participant"
               >
-                🚫
+                <UserX size={14} strokeWidth={2.25} />
               </button>
             </div>
           </div>
