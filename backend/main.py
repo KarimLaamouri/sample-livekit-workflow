@@ -297,9 +297,10 @@ def _parse_room_metadata(metadata: str | None) -> Any:
         return None
 
     try:
-        return json.loads(metadata)
+        parsed = json.loads(metadata)
     except ValueError:
-        return metadata
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _build_room_audit_data(room: Any) -> dict[str, Any] | None:
@@ -1262,20 +1263,28 @@ async def list_participants(
             participant_infos = []
             for participant in participants.participants:
                 participant_data = _build_participant_audit_data_from_participant(participant)
-                if participant_data:
+                if not participant_data:
+                    continue
+                try:
                     participant_infos.append(ParticipantInfo(**participant_data))
-            
+                except Exception:
+                    logger.exception(
+                        "Skipping malformed participant in list_participants: "
+                        "consultation_id=%s identity=%s",
+                        consultation_id,
+                        participant_data.get("identity"),
+                    )
+                    continue
+
             return participant_infos
-    except Exception:
+    except Exception as exc:
         logger.exception(
-            "Failed to list participants: consultation_id=%s room_name=%s",
+            "Failed to list participants: consultation_id=%s room_name=%s error=%s",
             consultation_id,
             consultation.room_name,
+            exc,
         )
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to list participants",
-        )
+        raise HTTPException(status_code=500, detail="Unable to list participants")
 
 
 @app.post("/api/consultations/{consultation_id}/participants/{identity}/remove")
