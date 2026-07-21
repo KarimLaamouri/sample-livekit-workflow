@@ -193,6 +193,11 @@ class LockConsultationResponse(BaseModel):
     locked: bool
 
 
+class ModerationActionResponse(BaseModel):
+    status: str
+    tracks_muted: int | None = None
+
+
 class ParticipantInfo(BaseModel):
     participant_id: str
     identity: str
@@ -1287,13 +1292,16 @@ async def list_participants(
         raise HTTPException(status_code=500, detail="Unable to list participants")
 
 
-@app.post("/api/consultations/{consultation_id}/participants/{identity}/remove")
+@app.post(
+    "/api/consultations/{consultation_id}/participants/{identity}/remove",
+    response_model=ModerationActionResponse,
+)
 async def remove_participant(
     consultation_id: str,
     identity: str,
     payload: ModerationActionPayload,
     session: AsyncSession = Depends(get_db),
-) -> dict[str, str]:
+) -> ModerationActionResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, for_update=True
     )
@@ -1305,7 +1313,7 @@ async def remove_participant(
             await lkapi.room.remove_participant(
                 api.RoomParticipantIdentity(room=consultation.room_name, identity=identity)
             )
-        
+
         await crud.create_audit_event(
             session,
             "participant.removed_by_host",
@@ -1314,8 +1322,8 @@ async def remove_participant(
             removed_by=payload.participant_name,
             target_identity=identity,
         )
-        
-        return {"status": "removed"}
+
+        return ModerationActionResponse(status="removed")
     except Exception:
         logger.exception(
             "Failed to remove participant: consultation_id=%s identity=%s",
@@ -1328,13 +1336,16 @@ async def remove_participant(
         )
 
 
-@app.post("/api/consultations/{consultation_id}/participants/{identity}/mute")
+@app.post(
+    "/api/consultations/{consultation_id}/participants/{identity}/mute",
+    response_model=ModerationActionResponse,
+)
 async def mute_participant(
     consultation_id: str,
     identity: str,
     payload: ModerationActionPayload,
     session: AsyncSession = Depends(get_db),
-) -> dict[str, str]:
+) -> ModerationActionResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, for_update=True
     )
@@ -1347,16 +1358,16 @@ async def mute_participant(
             participants = await lkapi.room.list_participants(
                 api.ListParticipantsRequest(room=consultation.room_name)
             )
-            
+
             target_participant = None
             for participant in participants.participants:
                 if participant.identity == identity:
                     target_participant = participant
                     break
-            
+
             if not target_participant:
                 raise HTTPException(status_code=404, detail="Participant not found")
-            
+
             # Mute all published tracks for the participant
             muted_count = 0
             if hasattr(target_participant, 'tracks') and target_participant.tracks:
@@ -1378,7 +1389,7 @@ async def mute_participant(
                             identity,
                             track.sid,
                         )
-        
+
         await crud.create_audit_event(
             session,
             "participant.muted_by_host",
@@ -1388,8 +1399,8 @@ async def mute_participant(
             target_identity=identity,
             tracks_muted=muted_count,
         )
-        
-        return {"status": "muted", "tracks_muted": muted_count}
+
+        return ModerationActionResponse(status="muted", tracks_muted=muted_count)
     except HTTPException:
         raise
     except Exception:
