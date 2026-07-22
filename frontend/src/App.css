@@ -560,6 +560,23 @@ button[type='submit']::after {
   color: rgba(243, 238, 229, 0.72);
 }
 
+.call-shell [data-lk-theme='default'] .lk-chat-entry,
+.call-shell [data-lk-theme='default'] .lk-chat-entry .lk-message-body,
+.call-shell [data-lk-theme='default'] .lk-chat-entry .lk-message-body-container,
+.call-shell [data-lk-theme='default'] .lk-message-origin,
+.call-shell [data-lk-theme='default'] .lk-chat-form-input {
+  color: var(--shell-strip-fg);
+}
+
+.call-shell [data-lk-theme='default'] .lk-chat-form-input::placeholder {
+  color: rgba(243, 238, 229, 0.5);
+}
+
+.call-shell [data-lk-theme='default'] .lk-meta-data,
+.call-shell [data-lk-theme='default'] .lk-timestamp {
+  color: rgba(243, 238, 229, 0.55);
+}
+
 @media (max-width: 760px) {
   .teleconsultation-console,
   .brand-bar {
