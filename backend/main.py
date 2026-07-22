@@ -198,6 +198,20 @@ class ModerationActionResponse(BaseModel):
     tracks_muted: int | None = None
 
 
+class SendChatMessagePayload(BaseModel):
+    participant_name: str = Field(min_length=1, max_length=80)
+    role: Literal["doctor", "patient", "observer"]
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class ChatMessageResponse(BaseModel):
+    sender_identity: str
+    sender_name: str
+    sender_role: str
+    body: str
+    sent_at: str
+
+
 class ParticipantInfo(BaseModel):
     participant_id: str
     identity: str
@@ -1413,6 +1427,57 @@ async def mute_participant(
             status_code=500,
             detail="Unable to mute participant",
         )
+
+
+@app.post("/api/consultations/{consultation_id}/chat")
+async def send_chat_message(
+    consultation_id: str,
+    payload: SendChatMessagePayload,
+    session: AsyncSession = Depends(get_db),
+) -> ChatMessageResponse:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    ensure_role_allowed_for_consultation(
+        consultation,
+        participant_name=payload.participant_name,
+        role=payload.role,
+    )
+
+    message = await crud.create_chat_message(
+        session,
+        consultation_id=consultation_id,
+        sender_identity=payload.participant_name,
+        sender_name=payload.participant_name,
+        sender_role=payload.role,
+        body=payload.body,
+    )
+
+    return ChatMessageResponse(
+        sender_identity=message.sender_identity,
+        sender_name=message.sender_name,
+        sender_role=message.sender_role,
+        body=message.body,
+        sent_at=message.sent_at.isoformat(),
+    )
+
+
+@app.get("/api/consultations/{consultation_id}/chat")
+async def list_chat_messages(
+    consultation_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> list[ChatMessageResponse]:
+    consultation = await crud.get_consultation_or_404(session, consultation_id, include_ended=True)
+    messages = await crud.list_chat_messages(session, consultation_id)
+
+    return [
+        ChatMessageResponse(
+            sender_identity=msg.sender_identity,
+            sender_name=msg.sender_name,
+            sender_role=msg.sender_role,
+            body=msg.body,
+            sent_at=msg.sent_at.isoformat(),
+        )
+        for msg in messages
+    ]
 
 
 @app.post("/api/webhooks")

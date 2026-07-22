@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import AuditEvent, Consultation, ProcessedWebhookEvent, WaitingRoomEntry
+from models import AuditEvent, ChatMessage, Consultation, ProcessedWebhookEvent, WaitingRoomEntry
 
 DEFAULT_AUDIT_LIMIT = 200
 
@@ -286,4 +286,38 @@ async def remember_webhook_event_id(session: AsyncSession, event_id: str) -> boo
 async def get_active_consultations(session: AsyncSession) -> list[Consultation]:
     """Return all consultations with status='active'."""
     stmt = select(Consultation).where(Consultation.status == "active")
+    return list((await session.execute(stmt)).scalars().all())
+
+
+# --------------------------------------------------------------------------
+# Chat messages
+# --------------------------------------------------------------------------
+
+async def create_chat_message(
+    session: AsyncSession,
+    *,
+    consultation_id: str,
+    sender_identity: str,
+    sender_name: str,
+    sender_role: str,
+    body: str,
+) -> ChatMessage:
+    message = ChatMessage(
+        consultation_id=consultation_id,
+        sender_identity=sender_identity,
+        sender_name=sender_name,
+        sender_role=sender_role,
+        body=body,
+    )
+    session.add(message)
+    await session.flush()
+    return message
+
+
+async def list_chat_messages(session: AsyncSession, consultation_id: str) -> list[ChatMessage]:
+    stmt = (
+        select(ChatMessage)
+        .where(ChatMessage.consultation_id == consultation_id)
+        .order_by(ChatMessage.sent_at.asc(), ChatMessage.id.asc())
+    )
     return list((await session.execute(stmt)).scalars().all())

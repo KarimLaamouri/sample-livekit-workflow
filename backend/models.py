@@ -100,3 +100,24 @@ class ProcessedWebhookEvent(Base):
     processed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    consultation_id: Mapped[str] = mapped_column(
+        ForeignKey("consultations.consultation_id", ondelete="CASCADE"), nullable=False
+    )
+    sender_identity: Mapped[str] = mapped_column(String(160), nullable=False)
+    sender_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    sender_role: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(String(2000), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("sender_role IN ('doctor', 'patient', 'observer')", name="ck_chat_message_role"),
+        Index("ix_chat_messages_consultation_sent_at", "consultation_id", "sent_at"),
+    )

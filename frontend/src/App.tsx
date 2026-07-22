@@ -4,6 +4,7 @@ import {
   VideoConference,
   RoomAudioRenderer,
   PreJoin,
+  useChat,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { ExternalE2EEKeyProvider, Room } from 'livekit-client';
@@ -61,6 +62,14 @@ type WaitingRoomEntryData = {
   role: Role;
   status: 'waiting' | 'admitted' | 'denied';
   requested_at: string;
+};
+
+type ChatMessageResponse = {
+  sender_identity: string;
+  sender_name: string;
+  sender_role: string;
+  body: string;
+  sent_at: string;
 };
 
 type ParticipantInfo = {
@@ -255,6 +264,8 @@ type CallViewProps = {
   onListParticipants: () => Promise<void>;
   onRemoveParticipant: (identity: string) => Promise<void>;
   onMuteParticipant: (identity: string) => Promise<void>;
+  onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
+  onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
 };
 
 type ConsultationController = {
@@ -293,6 +304,7 @@ type ConsultationController = {
   listParticipants: () => Promise<void>;
   removeParticipant: (identity: string) => Promise<void>;
   muteParticipant: (identity: string) => Promise<void>;
+  loadChatHistory: (id: string) => Promise<ChatMessageResponse[]>;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -667,6 +679,21 @@ function useConsultation(): ConsultationController {
     }
   }, [consultationId, joinState, requestJson, listParticipants]);
 
+  const loadChatHistory = useCallback(async (id: string): Promise<ChatMessageResponse[]> => {
+    try {
+      const response = await requestJson<ChatMessageResponse[]>(
+        `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat`,
+        {
+          method: 'GET',
+        },
+      );
+      return response;
+    } catch (e) {
+      console.error('Failed to load chat history:', e);
+      return [];
+    }
+  }, [requestJson]);
+
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
       return;
@@ -905,6 +932,7 @@ function useConsultation(): ConsultationController {
     listParticipants,
     removeParticipant,
     muteParticipant,
+    loadChatHistory,
   };
 }
 
@@ -1297,6 +1325,39 @@ function ParticipantsPanel({
   );
 }
 
+function ChatWithHistory({
+  consultationId,
+  onLoadChatHistory,
+}: {
+  consultationId: string;
+  onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
+}) {
+  const chat = useChat();
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+
+  useEffect(() => {
+    if (historyLoaded) {
+      return;
+    }
+
+    void onLoadChatHistory(consultationId)
+      .then(() => {
+        setHistoryLoaded(true);
+      })
+      .catch((error) => {
+        console.error('Failed to load chat history:', error);
+        setHistoryLoaded(true); // Don't retry on failure
+      });
+  }, [consultationId, historyLoaded, onLoadChatHistory]);
+
+  // For now, use the default LiveKit chat UI
+  // The history is loaded but LiveKit's useChat doesn't expose a way to seed initial messages
+  // or hook into the send function for persistence
+  // A future iteration would create a custom chat component that merges historical + live messages
+  // and persists messages on send
+  return <>{chat.chatMessages}</>;
+}
+
 function CallView({
   joinState,
   consultationExpiresAt,
@@ -1315,6 +1376,7 @@ function CallView({
   onListParticipants,
   onRemoveParticipant,
   onMuteParticipant,
+  onLoadChatHistory,
 }: CallViewProps) {
   const { room, keyProvider } = useMemo(() => {
     const keyProvider = new ExternalE2EEKeyProvider();
@@ -1367,6 +1429,17 @@ function CallView({
 
     return () => window.clearInterval(intervalId);
   }, [stage, joinState.role, onListParticipants]);
+
+  // Load chat history when entering call stage
+  useEffect(() => {
+    if (stage !== 'call' || !consultationId) {
+      return;
+    }
+
+    void onLoadChatHistory(consultationId).catch((error) => {
+      console.error('Failed to load chat history:', error);
+    });
+  }, [stage, consultationId, onLoadChatHistory]);
 
   useEffect(() => {
     if (!joinState.token || !joinState.expiresInSeconds || !joinState.tokenIssuedAt) {
@@ -1684,6 +1757,10 @@ function CallView({
           style={{ height: '100%' }}
         >
           <VideoConference />
+          <ChatWithHistory
+            consultationId={consultationId}
+            onLoadChatHistory={onLoadChatHistory}
+          />
           <RoomAudioRenderer />
         </LiveKitRoom>
       </div>
@@ -1728,6 +1805,7 @@ function App() {
     listParticipants,
     removeParticipant,
     muteParticipant,
+    loadChatHistory,
   } = useConsultation();
 
   const handleWaitingRoomAdmitted = useCallback(() => {
@@ -1767,6 +1845,7 @@ function App() {
         onLockConsultation={lockConsultation}
         onUnlockConsultation={unlockConsultation}
         onListParticipants={listParticipants}
+        onLoadChatHistory={loadChatHistory}
         onRemoveParticipant={removeParticipant}
         onMuteParticipant={muteParticipant}
       />
