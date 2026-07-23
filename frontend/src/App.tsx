@@ -1371,10 +1371,14 @@ function CustomChat({
   consultationId,
   onLoadChatHistory,
   onSendChatMessage,
+  isOpen,
+  onUnreadChange,
 }: {
   consultationId: string;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
   onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
+  isOpen: boolean;
+  onUnreadChange: (count: number) => void;
 }) {
   const chat = useChat();
   const [historyMessages, setHistoryMessages] = useState<ChatMessageResponse[]>([]);
@@ -1383,6 +1387,7 @@ function CustomChat({
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const seenCountRef = useRef(0);
 
   // Load history on mount
   useEffect(() => {
@@ -1393,6 +1398,7 @@ function CustomChat({
     void onLoadChatHistory(consultationId)
       .then((messages) => {
         setHistoryMessages(messages);
+        seenCountRef.current = messages.length;
         setHistoryLoaded(true);
         setLoading(false);
       })
@@ -1442,6 +1448,17 @@ function CustomChat({
       isLocal: m.from?.isLocal ?? false,
     })),
   ].sort((a, b) => a.timestamp - b.timestamp);
+
+  // Track unread messages while the panel is closed; reset once it's opened.
+  useEffect(() => {
+    if (isOpen) {
+      seenCountRef.current = combined.length;
+      onUnreadChange(0);
+      return;
+    }
+    const unread = Math.max(0, combined.length - seenCountRef.current);
+    onUnreadChange(unread);
+  }, [combined.length, isOpen, onUnreadChange]);
 
   return (
     <div className="custom-chat">
@@ -1531,6 +1548,8 @@ function CallView({
   const [connectionAction, setConnectionAction] = useState<null | (() => void)>(null);
   const [now, setNow] = useState(() => Date.now());
   const [tokenRequestPending, setTokenRequestPending] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const observerTokenRequested = useRef(false);
   const readyToConnect = skipPreview || deviceChoices !== null;
   const onRequestJoinTokenRef = useRef(onRequestJoinToken);
@@ -1834,6 +1853,16 @@ function CallView({
               <button type="button" className="end-button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
             </>
           )}
+          <button
+            type="button"
+            className={`chat-toggle-button${chatOpen ? ' active' : ''}`}
+            onClick={() => setChatOpen((open) => !open)}
+          >
+            💬 Chat
+            {!chatOpen && unreadCount > 0 && (
+              <span className="chat-unread-badge">{unreadCount > 9 ? '9+' : unreadCount}</span>
+            )}
+          </button>
           <button type="button" className="leave-button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
         </div>
       </div>
@@ -1890,11 +1919,13 @@ function CallView({
               <CustomVideoGrid />
               <ControlBar />
             </div>
-            <div className="custom-call-chat">
+            <div className={`custom-call-chat${chatOpen ? '' : ' custom-call-chat--collapsed'}`}>
               <CustomChat
                 consultationId={consultationId}
                 onLoadChatHistory={onLoadChatHistory}
                 onSendChatMessage={onSendChatMessage}
+                isOpen={chatOpen}
+                onUnreadChange={setUnreadCount}
               />
             </div>
           </div>
