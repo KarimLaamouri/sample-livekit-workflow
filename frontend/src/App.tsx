@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LiveKitRoom,
-  VideoConference,
   RoomAudioRenderer,
   PreJoin,
   useChat,
+  GridLayout,
+  ParticipantTile,
+  ControlBar,
+  useTracks,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
-import { ExternalE2EEKeyProvider, Room } from 'livekit-client';
+import { ExternalE2EEKeyProvider, Room, Track } from 'livekit-client';
 import { MicOff, UserX } from 'lucide-react';
 import './App.css';
 
@@ -305,6 +308,7 @@ type ConsultationController = {
   removeParticipant: (identity: string) => Promise<void>;
   muteParticipant: (identity: string) => Promise<void>;
   loadChatHistory: (id: string) => Promise<ChatMessageResponse[]>;
+  sendChatMessage: (id: string, body: string) => Promise<void>;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -694,6 +698,28 @@ function useConsultation(): ConsultationController {
     }
   }, [requestJson]);
 
+  const sendChatMessage = useCallback(async (id: string, body: string) => {
+    if (!joinState || !id.trim()) {
+      return;
+    }
+
+    try {
+      await requestJson<ChatMessageResponse>(
+        `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+            body,
+          }),
+        },
+      );
+    } catch (e) {
+      console.error('Failed to send chat message:', e);
+    }
+  }, [joinState, requestJson]);
+
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
       return;
@@ -933,6 +959,7 @@ function useConsultation(): ConsultationController {
     removeParticipant,
     muteParticipant,
     loadChatHistory,
+    sendChatMessage,
   };
 }
 
@@ -1325,37 +1352,138 @@ function ParticipantsPanel({
   );
 }
 
-function ChatWithHistory({
+function CustomVideoGrid() {
+  const tracks = useTracks([
+    { source: Track.Source.Camera, withPlaceholder: true },
+    { source: Track.Source.ScreenShare, withPlaceholder: false },
+  ]);
+
+  return (
+    <div className="custom-video-grid-wrap">
+      <GridLayout tracks={tracks}>
+        <ParticipantTile />
+      </GridLayout>
+    </div>
+  );
+}
+
+function CustomChat({
   consultationId,
   onLoadChatHistory,
+  onSendChatMessage,
 }: {
   consultationId: string;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
+  onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
 }) {
   const chat = useChat();
+  const [historyMessages, setHistoryMessages] = useState<ChatMessageResponse[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Load history on mount
   useEffect(() => {
     if (historyLoaded) {
       return;
     }
 
     void onLoadChatHistory(consultationId)
-      .then(() => {
+      .then((messages) => {
+        setHistoryMessages(messages);
         setHistoryLoaded(true);
+        setLoading(false);
       })
       .catch((error) => {
         console.error('Failed to load chat history:', error);
-        setHistoryLoaded(true); // Don't retry on failure
+        setHistoryLoaded(true);
+        setLoading(false);
       });
   }, [consultationId, historyLoaded, onLoadChatHistory]);
 
-  // For now, use the default LiveKit chat UI
-  // The history is loaded but LiveKit's useChat doesn't expose a way to seed initial messages
-  // or hook into the send function for persistence
-  // A future iteration would create a custom chat component that merges historical + live messages
-  // and persists messages on send
-  return <>{chat.chatMessages}</>;
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chat.chatMessages.length, historyMessages.length]);
+
+  const sendMessage = async () => {
+    const body = draft.trim();
+    if (!body || sending) return;
+    setSending(true);
+    try {
+      // Send via LiveKit for real-time delivery
+      await chat.send(body);
+      // Persist to backend
+      await onSendChatMessage(consultationId, body);
+      setDraft('');
+    } catch (e) {
+      console.error('Failed to send chat message', e);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // Merge historical and live messages
+  const combined = [
+    ...historyMessages.map((m) => ({
+      id: `history-${m.sent_at}-${m.sender_identity}`,
+      from: m.sender_name,
+      message: m.body,
+      timestamp: new Date(m.sent_at).getTime(),
+      isLocal: false, // Historical messages are from others
+    })),
+    ...chat.chatMessages.map((m) => ({
+      id: m.id,
+      from: m.from?.name ?? m.from?.identity ?? 'Unknown',
+      message: m.message,
+      timestamp: m.timestamp,
+      isLocal: m.from?.isLocal ?? false,
+    })),
+  ].sort((a, b) => a.timestamp - b.timestamp);
+
+  return (
+    <div className="custom-chat">
+      <div className="custom-chat-header">
+        <h3>Chat</h3>
+      </div>
+      <div className="custom-chat-messages">
+        {loading ? (
+          <div className="custom-chat-loading">Loading messages...</div>
+        ) : combined.length === 0 ? (
+          <div className="custom-chat-empty">No messages yet</div>
+        ) : (
+          combined.map((m) => (
+            <div
+              key={m.id}
+              className={`custom-chat-message ${m.isLocal ? 'custom-chat-message-local' : ''}`}
+            >
+              <span className="custom-chat-message-sender">{m.from}</span>
+              <span className="custom-chat-message-body">{m.message}</span>
+            </div>
+          ))
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+      <div className="custom-chat-input">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && void sendMessage()}
+          placeholder="Type a message…"
+          disabled={sending}
+        />
+        <button
+          type="button"
+          onClick={() => void sendMessage()}
+          disabled={sending || !draft.trim()}
+        >
+          {sending ? 'Sending...' : 'Send'}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function CallView({
@@ -1377,6 +1505,7 @@ function CallView({
   onRemoveParticipant,
   onMuteParticipant,
   onLoadChatHistory,
+  onSendChatMessage,
 }: CallViewProps) {
   const { room, keyProvider } = useMemo(() => {
     const keyProvider = new ExternalE2EEKeyProvider();
@@ -1756,11 +1885,19 @@ function CallView({
           data-lk-theme="default"
           style={{ height: '100%' }}
         >
-          <VideoConference />
-          <ChatWithHistory
-            consultationId={consultationId}
-            onLoadChatHistory={onLoadChatHistory}
-          />
+          <div className="custom-call-layout">
+            <div className="custom-call-video">
+              <CustomVideoGrid />
+              <ControlBar />
+            </div>
+            <div className="custom-call-chat">
+              <CustomChat
+                consultationId={consultationId}
+                onLoadChatHistory={onLoadChatHistory}
+                onSendChatMessage={onSendChatMessage}
+              />
+            </div>
+          </div>
           <RoomAudioRenderer />
         </LiveKitRoom>
       </div>
@@ -1806,6 +1943,7 @@ function App() {
     removeParticipant,
     muteParticipant,
     loadChatHistory,
+    sendChatMessage,
   } = useConsultation();
 
   const handleWaitingRoomAdmitted = useCallback(() => {
@@ -1846,6 +1984,7 @@ function App() {
         onUnlockConsultation={unlockConsultation}
         onListParticipants={listParticipants}
         onLoadChatHistory={loadChatHistory}
+        onSendChatMessage={sendChatMessage}
         onRemoveParticipant={removeParticipant}
         onMuteParticipant={muteParticipant}
       />
