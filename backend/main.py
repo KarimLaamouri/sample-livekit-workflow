@@ -201,7 +201,7 @@ class ModerationActionResponse(BaseModel):
 class SendChatMessagePayload(BaseModel):
     participant_name: str = Field(min_length=1, max_length=80)
     role: Literal["doctor", "patient", "observer"]
-    body: str = Field(min_length=1, max_length=2000)
+    body: str = Field(min_length=1, max_length=3000)
 
 
 class ChatMessageResponse(BaseModel):
