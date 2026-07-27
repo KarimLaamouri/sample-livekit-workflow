@@ -7,13 +7,85 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import BYTEA
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
+from encryption import blind_index, decrypt_json, decrypt_value, encrypt_json, encrypt_value
+
+
+class EncryptedString(TypeDecorator):
+    """TypeDecorator for encrypting string values at rest using AES-256-GCM.
+    
+    Stores encrypted data as BYTEA in the database. The encryption includes
+    a random nonce per value, so the same plaintext will produce different
+    ciphertexts each time (non-deterministic encryption).
+    
+    Transparently encrypts on write (process_bind_param) and decrypts on read
+    (process_result_value). None values pass through unchanged.
+    """
+    impl = BYTEA
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        """Encrypt plaintext before writing to database."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError(f"EncryptedString expects str, got {type(value)}")
+        return encrypt_value(value)
+
+    def process_result_value(self, value, dialect):
+        """Decrypt ciphertext after reading from database."""
+        if value is None:
+            return None
+        if not isinstance(value, bytes):
+            raise TypeError(f"EncryptedString expects bytes from DB, got {type(value)}")
+        try:
+            return decrypt_value(value)
+        except Exception as e:
+            # If decryption fails, this could be legacy plaintext data
+            # during migration. Log and return as-is for now.
+            # In production, this should raise or handle gracefully.
+            # For this task, we'll assume all data is encrypted after migration.
+            raise ValueError(f"Failed to decrypt encrypted string: {e}")
+
+
+class EncryptedJSON(TypeDecorator):
+    """TypeDecorator for encrypting JSON dictionaries at rest using AES-256-GCM.
+    
+    Stores encrypted JSON as BYTEA in the database. The entire JSON blob is
+    encrypted as a single ciphertext.
+    
+    Transparently encrypts on write (process_bind_param) and decrypts on read
+    (process_result_value). None values pass through unchanged.
+    """
+    impl = BYTEA
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        """Encrypt JSON dict before writing to database."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise TypeError(f"EncryptedJSON expects dict, got {type(value)}")
+        return encrypt_json(value)
+
+    def process_result_value(self, value, dialect):
+        """Decrypt ciphertext after reading from database."""
+        if value is None:
+            return None
+        if not isinstance(value, bytes):
+            raise TypeError(f"EncryptedJSON expects bytes from DB, got {type(value)}")
+        try:
+            return decrypt_json(value)
+        except Exception as e:
+            raise ValueError(f"Failed to decrypt encrypted JSON: {e}")
 
 
 class Consultation(Base):
@@ -21,8 +93,8 @@ class Consultation(Base):
 
     consultation_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     room_name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
-    doctor_name: Mapped[str] = mapped_column(String(80), nullable=False)
-    patient_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    doctor_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
+    patient_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     e2ee_key: Mapped[str] = mapped_column(String(64), nullable=False)
 
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
@@ -31,7 +103,7 @@ class Consultation(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ended_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    ended_by: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     waiting_room_entries: Mapped[list["WaitingRoomEntry"]] = relationship(
@@ -52,7 +124,8 @@ class WaitingRoomEntry(Base):
     consultation_id: Mapped[str] = mapped_column(
         ForeignKey("consultations.consultation_id", ondelete="CASCADE"), nullable=False
     )
-    participant_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    participant_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
+    participant_name_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="waiting")
     requested_at: Mapped[datetime] = mapped_column(
@@ -62,7 +135,7 @@ class WaitingRoomEntry(Base):
     consultation: Mapped["Consultation"] = relationship(back_populates="waiting_room_entries")
 
     __table_args__ = (
-        UniqueConstraint("consultation_id", "participant_name", name="uq_waiting_room_participant"),
+        UniqueConstraint("consultation_id", "participant_name_hash", name="uq_waiting_room_participant"),
         CheckConstraint(
             "status IN ('waiting', 'admitted', 'denied')", name="ck_waiting_room_status"
         ),
@@ -83,7 +156,7 @@ class AuditEvent(Base):
     # even if we can't resolve a consultation (e.g. malformed webhook), and
     # must never be lost if a consultation row is ever purged.
     consultation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    details: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    details: Mapped[dict | None] = mapped_column(EncryptedJSON, nullable=True)
 
     __table_args__ = (
         Index("ix_audit_events_timestamp", "timestamp"),
@@ -109,10 +182,10 @@ class ChatMessage(Base):
     consultation_id: Mapped[str] = mapped_column(
         ForeignKey("consultations.consultation_id", ondelete="CASCADE"), nullable=False
     )
-    sender_identity: Mapped[str] = mapped_column(String(160), nullable=False)
-    sender_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    sender_identity: Mapped[str] = mapped_column(EncryptedString, nullable=False)
+    sender_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     sender_role: Mapped[str] = mapped_column(String(16), nullable=False)
-    body: Mapped[str] = mapped_column(String(2000), nullable=False)
+    body: Mapped[str] = mapped_column(String(3000), nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from encryption import blind_index
 from models import AuditEvent, ChatMessage, Consultation, ProcessedWebhookEvent, WaitingRoomEntry
 
 DEFAULT_AUDIT_LIMIT = 200
@@ -167,9 +168,10 @@ async def get_waiting_room_entry(
     *,
     for_update: bool = False,
 ) -> WaitingRoomEntry | None:
+    participant_name_hash = blind_index(participant_name)
     stmt = select(WaitingRoomEntry).where(
         WaitingRoomEntry.consultation_id == consultation_id,
-        WaitingRoomEntry.participant_name == participant_name,
+        WaitingRoomEntry.participant_name_hash == participant_name_hash,
     )
     if for_update:
         stmt = stmt.with_for_update()
@@ -187,6 +189,7 @@ async def create_waiting_room_entry(
     entry = WaitingRoomEntry(
         consultation_id=consultation_id,
         participant_name=participant_name,
+        participant_name_hash=blind_index(participant_name),
         role=role,
         status=status,
         requested_at=utc_now(),
