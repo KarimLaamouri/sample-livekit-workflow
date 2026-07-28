@@ -10,8 +10,8 @@ A secure, healthcare-compliant video conferencing workflow built with **LiveKit*
 * **WebRTC Infrastructure:** LiveKit Server
 * **Encryption:**
   * Media (audio/video) end-to-end encryption via LiveKit's native frame-level E2EE.
-  * Chat message content encrypted client-side (AES-GCM, Web Crypto API) before it ever reaches the backend — the server persists ciphertext only.
-  * PII/PHI fields (participant names, audit log details) encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), transparent to the rest of the backend via SQLAlchemy `TypeDecorator`s.
+  * Chat message content encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), same as other PII/PHI fields.
+  * PII/PHI fields (participant names, audit log details, chat sender identity) encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), transparent to the rest of the backend via SQLAlchemy `TypeDecorator`s.
 * **Security Focus:** Short-lived JWTs, strict room isolation, comprehensive audit logging, and field-level encryption for compliance tracking.
 
 ---
@@ -186,7 +186,7 @@ This workflow is designed with healthcare and enterprise security requirements i
 * **Ephemeral Rooms:** Rooms are dynamically created for specific consultations and automatically destroyed when empty or expired.
 * **Strict Role-Based Access Control (RBAC):** Access tokens are generated with specific LiveKit Video Grants, ensuring patients, doctors, and observers have strictly defined permissions (e.g., publish vs. subscribe-only).
 * **Short-Lived Tokens:** JWTs are minted with a low Time-To-Live (TTL) to minimize the attack surface in case of token interception.
-* **Media & Chat Encryption:** Audio/video is protected by LiveKit's native end-to-end frame encryption; chat message content is separately encrypted client-side before it reaches the backend, so the server never has access to plaintext chat content.
+* **Media & Chat Encryption:** Audio/video is protected by LiveKit's native end-to-end frame encryption; chat message content is encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), same as other PII/PHI fields.
 * **Field-Level Encryption at Rest:** Participant/doctor/patient names, waiting room entries, audit event details, and chat sender identity are encrypted at the application layer (AES-256-GCM) before being written to PostgreSQL, protecting against database-level exposure (backup theft, unauthorized DB access, SQL injection dumps) even though the fields remain queryable/joinable where the application needs them to be.
 * **Comprehensive, Durable Audit Logging:** Every critical event (room creation, token issuance, waiting-room admission/denial, room termination, LiveKit webhook events) is persisted to the `audit_events` table in PostgreSQL — surviving backend restarts, unlike the earlier in-memory implementation.
 * **Transactional Integrity:** Consultation creation is wrapped in a database transaction; if LiveKit room creation fails, the consultation record is rolled back rather than left in an inconsistent state, while the failure itself is still recorded in the audit trail.

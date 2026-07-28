@@ -185,7 +185,7 @@ class ChatMessage(Base):
     sender_identity: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     sender_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     sender_role: Mapped[str] = mapped_column(String(16), nullable=False)
-    body: Mapped[str] = mapped_column(String(3000), nullable=False)
+    body: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

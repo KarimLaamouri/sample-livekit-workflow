@@ -270,7 +270,6 @@ type CallViewProps = {
   onMuteParticipant: (identity: string) => Promise<void>;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
   onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
-  chatCryptoKey: CryptoKey | null;
 };
 
 type ConsultationController = {
@@ -311,7 +310,6 @@ type ConsultationController = {
   muteParticipant: (identity: string) => Promise<void>;
   loadChatHistory: (id: string) => Promise<ChatMessageResponse[]>;
   sendChatMessage: (id: string, body: string) => Promise<void>;
-  chatCryptoKey: CryptoKey | null;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -322,51 +320,6 @@ const formatCountdown = (totalSeconds: number): string => {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 };
 
-// --- E2EE Chat Helpers ---
-async function deriveChatKey(e2eeKey: string): Promise<CryptoKey> {
-  const enc = new TextEncoder();
-  const keyMaterial = await window.crypto.subtle.digest('SHA-256', enc.encode(e2eeKey));
-  return window.crypto.subtle.importKey(
-    'raw',
-    keyMaterial,
-    { name: 'AES-GCM' },
-    false,
-    ['encrypt', 'decrypt']
-  );
-}
-
-async function encryptChatBody(key: CryptoKey, plaintext: string): Promise<string> {
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
-  const encodedText = new TextEncoder().encode(plaintext);
-  const ciphertextBuffer = await window.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    encodedText
-  );
-
-  const combined = new Uint8Array(iv.length + ciphertextBuffer.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(ciphertextBuffer), iv.length);
-  return btoa(String.fromCharCode(...combined));
-}
-
-async function decryptChatBody(key: CryptoKey, payload: string): Promise<string> {
-  try {
-    const rawString = atob(payload);
-    const combined = Uint8Array.from(rawString, c => c.charCodeAt(0));
-    const iv = combined.slice(0, 12);
-    const ciphertext = combined.slice(12);
-    const decryptedBuffer = await window.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      key,
-      ciphertext
-    );
-    return new TextDecoder().decode(decryptedBuffer);
-  } catch (err) {
-    return '[unable to decrypt]';
-  }
-}
-// -------------------------
 
 const isTokenConnectionError = (error: unknown): boolean => {
   if (!error || typeof error !== 'object') {
@@ -427,22 +380,6 @@ function useConsultation(): ConsultationController {
   const [waitingRoomStatus, setWaitingRoomStatus] = useState<'waiting' | 'admitted' | 'denied' | null>(null);
   const [locked, setLocked] = useState(false);
   const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
-  const [chatCryptoKey, setChatCryptoKey] = useState<CryptoKey | null>(null);
-
-  // Derive chat encryption key once per session when e2eeKey is available
-  useEffect(() => {
-    if (!joinState?.e2eeKey) {
-      setChatCryptoKey(null);
-      return;
-    }
-
-    void deriveChatKey(joinState.e2eeKey)
-      .then(setChatCryptoKey)
-      .catch((err) => {
-        console.error('Failed to derive chat encryption key:', err);
-        setChatCryptoKey(null);
-      });
-  }, [joinState?.e2eeKey]);
 
   const markConsultationEnded = useCallback((endedAt: string, notice: ErrorNotice) => {
     setConsultation((current) => {
@@ -769,9 +706,6 @@ function useConsultation(): ConsultationController {
     }
 
     try {
-      // Encrypt body for REST persistence (LiveKit chat.send uses plaintext)
-      const bodyToSend = chatCryptoKey ? await encryptChatBody(chatCryptoKey, body) : body;
-
       await requestJson<ChatMessageResponse>(
         `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat`,
         {
@@ -779,14 +713,14 @@ function useConsultation(): ConsultationController {
           body: JSON.stringify({
             participant_name: joinState.participantName,
             role: joinState.role,
-            body: bodyToSend,
+            body: body,
           }),
         },
       );
     } catch (e) {
       console.error('Failed to send chat message:', e);
     }
-  }, [joinState, requestJson, chatCryptoKey]);
+  }, [joinState, requestJson]);
 
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
@@ -1028,7 +962,6 @@ function useConsultation(): ConsultationController {
     muteParticipant,
     loadChatHistory,
     sendChatMessage,
-    chatCryptoKey,
   };
 }
 
@@ -1442,18 +1375,15 @@ function CustomChat({
   onSendChatMessage,
   isOpen,
   onUnreadChange,
-  chatCryptoKey,
 }: {
   consultationId: string;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
   onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
   isOpen: boolean;
   onUnreadChange: (count: number) => void;
-  chatCryptoKey: CryptoKey | null;
 }) {
   const chat = useChat();
   const room = useRoomContext();
-  const [rawHistory, setRawHistory] = useState<ChatMessageResponse[]>([]);
   const [historyMessages, setHistoryMessages] = useState<ChatMessageResponse[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1463,7 +1393,7 @@ function CustomChat({
   const seenCountRef = useRef(0);
   const fetchInProgressRef = useRef(false);
 
-  // Fetch history (only manages rawHistory, no decryption)
+  // Fetch history
   const fetchHistory = useCallback(async () => {
     if (fetchInProgressRef.current) {
       return;
@@ -1474,8 +1404,8 @@ function CustomChat({
     try {
       const messages = await onLoadChatHistory(consultationId);
 
-      // Merge new messages into rawHistory by identity (sender_identity + sent_at)
-      setRawHistory((prev) => {
+      // Merge new messages into historyMessages by identity (sender_identity + sent_at)
+      setHistoryMessages((prev) => {
         const existingKeys = new Set(prev.map((msg) => `${msg.sender_identity}|${msg.sent_at}`));
         const newMessages = messages.filter(
           (msg) => !existingKeys.has(`${msg.sender_identity}|${msg.sent_at}`)
@@ -1526,36 +1456,6 @@ function CustomChat({
     }
   }, [isOpen, historyLoaded, fetchHistory]);
 
-  // Decrypt rawHistory when chatCryptoKey is available
-  useEffect(() => {
-    if (rawHistory.length === 0) {
-      setHistoryMessages([]);
-      return;
-    }
-
-    if (!chatCryptoKey) {
-      // Key not yet available, show loading state
-      setLoading(true);
-      return;
-    }
-
-    // Decrypt all messages
-    void Promise.all(
-      rawHistory.map(async (msg) => {
-        const decryptedBody = await decryptChatBody(chatCryptoKey, msg.body);
-        return { ...msg, body: decryptedBody };
-      })
-    )
-      .then(setHistoryMessages)
-      .catch((err) => {
-        console.error('Failed to decrypt chat history:', err);
-        setHistoryMessages(rawHistory);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  }, [rawHistory, chatCryptoKey]);
-
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1563,12 +1463,12 @@ function CustomChat({
 
   const sendMessage = async () => {
     const body = draft.trim();
-    if (!body || sending || !chatCryptoKey) return;
+    if (!body || sending) return;
     setSending(true);
     try {
       // Send via LiveKit for real-time delivery (plaintext, encrypted by LiveKit)
       await chat.send(body);
-      // Persist to backend (encrypted with our E2EE key)
+      // Persist to backend (plaintext, encrypted at rest by server)
       await onSendChatMessage(consultationId, body);
       setDraft('');
     } catch (e) {
@@ -1635,15 +1535,15 @@ function CustomChat({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void sendMessage()}
-          placeholder={chatCryptoKey ? 'Type a message…' : 'Securing chat…'}
-          disabled={sending || !chatCryptoKey}
+          placeholder="Type a message…"
+          disabled={sending}
         />
         <button
           type="button"
           onClick={() => void sendMessage()}
-          disabled={sending || !draft.trim() || !chatCryptoKey}
+          disabled={sending || !draft.trim()}
         >
-          {sending ? 'Sending...' : chatCryptoKey ? 'Send' : 'Securing…'}
+          {sending ? 'Sending...' : 'Send'}
         </button>
       </div>
     </div>
@@ -1670,7 +1570,6 @@ function CallView({
   onMuteParticipant,
   onLoadChatHistory,
   onSendChatMessage,
-  chatCryptoKey,
 }: CallViewProps) {
   const { room, keyProvider } = useMemo(() => {
     const keyProvider = new ExternalE2EEKeyProvider();
@@ -2061,7 +1960,6 @@ function CallView({
                 consultationId={consultationId}
                 onLoadChatHistory={onLoadChatHistory}
                 onSendChatMessage={onSendChatMessage}
-                chatCryptoKey={chatCryptoKey}
                 isOpen={chatOpen}
                 onUnreadChange={setUnreadCount}
               />
@@ -2113,7 +2011,6 @@ function App() {
     muteParticipant,
     loadChatHistory,
     sendChatMessage,
-    chatCryptoKey,
   } = useConsultation();
 
   const handleWaitingRoomAdmitted = useCallback(() => {
@@ -2155,7 +2052,6 @@ function App() {
         onListParticipants={listParticipants}
         onLoadChatHistory={loadChatHistory}
         onSendChatMessage={sendChatMessage}
-        chatCryptoKey={chatCryptoKey}
         onRemoveParticipant={removeParticipant}
         onMuteParticipant={muteParticipant}
       />
