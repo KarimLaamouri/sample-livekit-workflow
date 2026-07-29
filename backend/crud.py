@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from encryption import blind_index
+from e2ee import current_e2ee_key_version
 from models import AuditEvent, ChatMessage, Consultation, ProcessedWebhookEvent, WaitingRoomEntry
 
 DEFAULT_AUDIT_LIMIT = 200
@@ -27,7 +28,6 @@ async def create_consultation(
     room_name: str,
     doctor_name: str,
     patient_name: str,
-    e2ee_key: str,
     expires_at: datetime,
 ) -> Consultation:
     consultation = Consultation(
@@ -35,7 +35,7 @@ async def create_consultation(
         room_name=room_name,
         doctor_name=doctor_name,
         patient_name=patient_name,
-        e2ee_key=e2ee_key,
+        e2ee_key_version=current_e2ee_key_version(),
         expires_at=expires_at,
         status="active",
     )

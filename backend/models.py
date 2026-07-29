@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import BYTEA
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
+from e2ee import derive_e2ee_key
 from encryption import blind_index, decrypt_json, decrypt_value, encrypt_json, encrypt_value
 
 
@@ -95,7 +96,7 @@ class Consultation(Base):
     room_name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     doctor_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     patient_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
-    e2ee_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    e2ee_key_version: Mapped[int] = mapped_column(nullable=False)
 
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(
@@ -115,6 +116,16 @@ class Consultation(Base):
         CheckConstraint("status IN ('active', 'ended')", name="ck_consultation_status"),
         Index("ix_consultations_expires_at", "expires_at"),
     )
+
+
+def get_e2ee_key(consultation: Consultation) -> str:
+    """Derive the E2EE key for a consultation from the versioned master secret.
+
+    The key is computed deterministically via HMAC-SHA256, so every caller
+    for the same consultation receives the identical value without any key
+    material being stored in the database.
+    """
+    return derive_e2ee_key(consultation.consultation_id, consultation.e2ee_key_version)
 
 
 class WaitingRoomEntry(Base):

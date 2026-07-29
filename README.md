@@ -211,6 +211,33 @@ LIVEKIT_API_SECRET=your_dev_secret
 # These two keys must NOT be the same value as each other.
 DATABASE_ENCRYPTION_KEY=your_generated_32_byte_key_base64
 DATABASE_BLIND_INDEX_KEY=your_generated_32_byte_key_base64
+
+# E2EE key derivation for LiveKit media encryption
+# Generate with: openssl rand -base64 32
+# Must be DIFFERENT values from DATABASE_ENCRYPTION_KEY and DATABASE_BLIND_INDEX_KEY — do not reuse either.
+E2EE_MASTER_SECRET_V1=your_generated_32_byte_key_base64
+E2EE_CURRENT_KEY_VERSION=1
 ```
 
 (Never commit your `.env` file to version control. Use `.env.example` to track required keys — with placeholder, non-functional values only, never real generated keys.)
+
+### 🔄 E2EE Master Secret Rotation
+
+The E2EE key derivation supports seamless secret rotation:
+
+1. **Generate a new secret:**
+   ```bash
+   openssl rand -base64 32
+   ```
+2. **Add the new version** to your environment (alongside, not replacing, the old one):
+   ```
+   E2EE_MASTER_SECRET_V1=<original_secret>
+   E2EE_MASTER_SECRET_V2=<new_secret>
+   ```
+3. **Deploy** the updated environment. At this point, existing consultations still use V1 and new ones still use V1.
+4. **Bump the current version:**
+   ```
+   E2EE_CURRENT_KEY_VERSION=2
+   ```
+5. **Deploy again.** New consultations are now stamped with `e2ee_key_version=2` and derive their key from the V2 secret.
+6. **Retire old versions:** Old secret versions must stay present for as long as any consultation with that version could still be actively in progress or reconnecting. Since consultations are short-lived (`CONSULTATION_TTL_MINUTES`, default 60 minutes), old versions can typically be removed from the environment soon after rotation.

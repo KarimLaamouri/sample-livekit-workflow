@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import logging
 import os
@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import crud
 from database import AsyncSessionLocal, get_db
-from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel
+from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel, get_e2ee_key
 
 load_dotenv()
 
@@ -852,7 +852,6 @@ async def create_consultation(
 
     consultation_id = secrets.token_urlsafe(12)
     room_name = f"tachafy-{consultation_id}"
-    e2ee_key = secrets.token_urlsafe(32)
     expires_at = utc_now() + timedelta(minutes=CONSULTATION_TTL_MINUTES)
 
     await crud.create_consultation(
@@ -861,7 +860,6 @@ async def create_consultation(
         room_name=room_name,
         doctor_name=payload.doctor_name,
         patient_name=payload.patient_name,
-        e2ee_key=e2ee_key,
         expires_at=expires_at,
     )
 
@@ -1157,7 +1155,7 @@ async def create_consultation_token(
         participant_name=payload.participant_name,
         role=payload.role,
         expires_in_seconds=TOKEN_TTL_SECONDS,
-        e2ee_key=consultation.e2ee_key,
+        e2ee_key=get_e2ee_key(consultation),
     )
 
 
