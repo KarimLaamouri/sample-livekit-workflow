@@ -52,15 +52,6 @@ type ErrorNotice = {
   status?: number;
 };
 
-type AuditEvent = {
-  timestamp: string;
-  event_type: string;
-  consultation_id?: string;
-  ended_by?: string;
-  room_name?: string;
-  source?: string;
-};
-
 type WaitingRoomEntryData = {
   participant_name: string;
   role: Role;
@@ -759,45 +750,38 @@ function useConsultation(): ConsultationController {
 
     const syncConsultationState = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/audit-events`);
+        const response = await fetch(
+          `${API_URL}/api/consultations/${encodeURIComponent(consultationIdForWatch)}/status`,
+        );
 
         if (!response.ok) {
           return;
         }
 
-        const events = await response.json() as AuditEvent[];
+        const data = await response.json() as {
+          consultation_id: string;
+          status: 'active' | 'ended';
+          ended_at: string | null;
+        };
 
         if (cancelled) {
           return;
         }
 
-        const latestMatchingEvent = [...events].reverse().find((event) => {
-          if (event.consultation_id !== consultationIdForWatch) {
-            return false;
-          }
-
-          return event.event_type === 'consultation.ended' || event.event_type === 'consultation.expired';
-        });
-
-        if (!latestMatchingEvent) {
-          return;
-        }
-
-        if (latestMatchingEvent.event_type === 'consultation.ended') {
-          markConsultationEnded(latestMatchingEvent.timestamp, {
+        if (data.status === 'ended') {
+          // We no longer have the raw audit event, so we lose the specific
+          // 'ended_by' actor string and the ended vs. expired distinction.
+          // This is an accepted, deliberate tradeoff for closing the global
+          // audit-read exposure — do not try to recover it by adding any
+          // other broad read back in.
+          markConsultationEnded(data.ended_at ?? consultation.expires_at, {
             title: 'Consultation ended elsewhere',
             message: callStage === 'call'
-              ? `This consultation was ended by ${latestMatchingEvent.ended_by ?? 'another window'} while the call was active.`
-              : `This consultation was ended by ${latestMatchingEvent.ended_by ?? 'another window'} while you were still setting up.`,
+              ? 'This consultation was ended while the call was active.'
+              : 'This consultation was ended while you were still setting up.',
             suggestion: 'Request a new consultation ID if you need to rejoin.',
           });
-          return;
         }
-
-        markConsultationEnded(consultation.expires_at, {
-          ...buildConsultationEndedNotice(callStage),
-          suggestion: 'Create a new consultation to continue.',
-        });
       } catch {
         if (!cancelled) {
           return;

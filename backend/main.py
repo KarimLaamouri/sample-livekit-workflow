@@ -138,6 +138,12 @@ class ValidateJoinResponse(BaseModel):
     status: ConsultationStatus
 
 
+class ConsultationStatusResponse(BaseModel):
+    consultation_id: str
+    status: ConsultationStatus
+    ended_at: str | None
+
+
 class TokenRequest(BaseModel):
     participant_name: str = Field(min_length=1, max_length=80)
     role: Role
@@ -908,6 +914,19 @@ async def validate_consultation_join(
     )
 
 
+@app.get("/api/consultations/{consultation_id}/status", response_model=ConsultationStatusResponse)
+async def get_consultation_status(
+    consultation_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> ConsultationStatusResponse:
+    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    return ConsultationStatusResponse(
+        consultation_id=consultation.consultation_id,
+        status=consultation.status,
+        ended_at=consultation.ended_at.isoformat() if consultation.ended_at else None,
+    )
+
+
 @app.post("/api/consultations/{consultation_id}/waiting-room/request", response_model=WaitingRoomEntry)
 async def request_waiting_room(
     consultation_id: str,
@@ -1494,7 +1513,7 @@ async def livekit_webhook(
 
     return {"status": "received"}
 
-
+####################### TO DELETE ON PROD #####################
 @app.get("/api/audit-events")
 async def list_audit_events(session: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     events = await crud.list_audit_events(session, limit=AUDIT_EVENTS_LIMIT)
@@ -1512,3 +1531,4 @@ async def list_audit_events(session: AsyncSession = Depends(get_db)) -> list[dic
         serialized.append(payload)
 
     return serialized
+####################### TO DELETE ON PROD #####################

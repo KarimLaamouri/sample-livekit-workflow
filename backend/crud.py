@@ -255,18 +255,16 @@ async def create_audit_event(
     await session.flush()
     return event
 
-
-async def list_audit_events(
-    session: AsyncSession, limit: int = DEFAULT_AUDIT_LIMIT
-) -> list[AuditEvent]:
+####################### TO DELETE ON PROD #####################
+async def list_audit_events(session: AsyncSession, limit: int = 200) -> list[AuditEvent]:
+    """List audit events, most recent first, up to the given limit."""
     stmt = (
         select(AuditEvent)
         .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
         .limit(limit)
     )
-    events = list((await session.execute(stmt)).scalars().all())
-    events.reverse()  # oldest-first, matching the original list's append order
-    return events
+    return list((await session.execute(stmt)).scalars().all())
+####################### TO DELETE ON PROD #####################
 
 
 # --------------------------------------------------------------------------
