@@ -520,13 +520,45 @@ function useConsultation(): ConsultationController {
     }
   }, [consultationId, participantName, requestJson, role]);
 
-  const leaveCall = useCallback(() => {
+  const leaveCall = useCallback(async () => {
+    // Check if consultation was ended elsewhere (single check on disconnect, no polling)
+    if (consultation && consultation.status !== 'ended' && consultationId) {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/status`,
+        );
+
+        if (response.ok) {
+          const data = await response.json() as {
+            consultation_id: string;
+            status: 'active' | 'ended';
+            ended_at: string | null;
+          };
+
+          if (data.status === 'ended') {
+            // Consultation was ended elsewhere
+            markConsultationEnded(data.ended_at ?? consultation.expires_at, {
+              title: 'Consultation ended elsewhere',
+              message: callStage === 'call'
+                ? 'This consultation was ended while the call was active.'
+                : 'This consultation was ended while you were still setting up.',
+              suggestion: 'Request a new consultation ID if you need to rejoin.',
+            });
+            return;
+          }
+        }
+      } catch {
+        // If check fails, fall through to normal leave behavior
+      }
+    }
+
+    // Normal voluntary leave
     setJoinState(null);
     setCallStage(null);
     setWaitingForAdmission(false);
     setWaitingRoomStatus(null);
     setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
-  }, []);
+  }, [consultation, consultationId, callStage, markConsultationEnded]);
 
   const returnToJoinForm = useCallback((errorNotice?: ErrorNotice) => {
     setJoinState(null);
@@ -740,63 +772,63 @@ function useConsultation(): ConsultationController {
     return () => window.clearTimeout(timeoutId);
   }, [consultation, callStage]);
 
-  useEffect(() => {
-    if (!consultation || consultation.status === 'ended') {
-      return;
-    }
+  // useEffect(() => {
+  //   if (!consultation || consultation.status === 'ended') {
+  //     return;
+  //   }
 
-    let cancelled = false;
-    const consultationIdForWatch = consultation.consultation_id;
+  //   let cancelled = false;
+  //   const consultationIdForWatch = consultation.consultation_id;
 
-    const syncConsultationState = async () => {
-      try {
-        const response = await fetch(
-          `${API_URL}/api/consultations/${encodeURIComponent(consultationIdForWatch)}/status`,
-        );
+  //   const syncConsultationState = async () => {
+  //     try {
+  //       const response = await fetch(
+  //         `${API_URL}/api/consultations/${encodeURIComponent(consultationIdForWatch)}/status`,
+  //       );
 
-        if (!response.ok) {
-          return;
-        }
+  //       if (!response.ok) {
+  //         return;
+  //       }
 
-        const data = await response.json() as {
-          consultation_id: string;
-          status: 'active' | 'ended';
-          ended_at: string | null;
-        };
+  //       const data = await response.json() as {
+  //         consultation_id: string;
+  //         status: 'active' | 'ended';
+  //         ended_at: string | null;
+  //       };
 
-        if (cancelled) {
-          return;
-        }
+  //       if (cancelled) {
+  //         return;
+  //       }
 
-        if (data.status === 'ended') {
-          // We no longer have the raw audit event, so we lose the specific
-          // 'ended_by' actor string and the ended vs. expired distinction.
-          // This is an accepted, deliberate tradeoff for closing the global
-          // audit-read exposure — do not try to recover it by adding any
-          // other broad read back in.
-          markConsultationEnded(data.ended_at ?? consultation.expires_at, {
-            title: 'Consultation ended elsewhere',
-            message: callStage === 'call'
-              ? 'This consultation was ended while the call was active.'
-              : 'This consultation was ended while you were still setting up.',
-            suggestion: 'Request a new consultation ID if you need to rejoin.',
-          });
-        }
-      } catch {
-        if (!cancelled) {
-          return;
-        }
-      }
-    };
+  //       if (data.status === 'ended') {
+  //         // We no longer have the raw audit event, so we lose the specific
+  //         // 'ended_by' actor string and the ended vs. expired distinction.
+  //         // This is an accepted, deliberate tradeoff for closing the global
+  //         // audit-read exposure — do not try to recover it by adding any
+  //         // other broad read back in.
+  //         markConsultationEnded(data.ended_at ?? consultation.expires_at, {
+  //           title: 'Consultation ended elsewhere',
+  //           message: callStage === 'call'
+  //             ? 'This consultation was ended while the call was active.'
+  //             : 'This consultation was ended while you were still setting up.',
+  //           suggestion: 'Request a new consultation ID if you need to rejoin.',
+  //         });
+  //       }
+  //     } catch {
+  //       if (!cancelled) {
+  //         return;
+  //       }
+  //     }
+  //   };
 
-    void syncConsultationState();
-    const intervalId = window.setInterval(syncConsultationState, 5000);
+  //   void syncConsultationState();
+  //   const intervalId = window.setInterval(syncConsultationState, 5000);
 
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [consultation?.consultation_id, consultation?.expires_at, consultation?.status, callStage, joinState]);
+  //   return () => {
+  //     cancelled = true;
+  //     window.clearInterval(intervalId);
+  //   };
+  // }, [consultation?.consultation_id, consultation?.expires_at, consultation?.status, callStage, joinState]);
 
   const endConsultation = useCallback(async () => {
     if (!joinState || !consultationId.trim()) {
@@ -1595,22 +1627,37 @@ function CallView({
 
   useEffect(() => () => onStageChange(null), [onStageChange]);
 
-  // Poll participants when in call stage and role is doctor
+  // Refresh participants when in call stage and role is doctor.
+  // Event-driven off the LiveKit room connection instead of a timer:
+  // we still hit the existing REST endpoint (it returns richer data than
+  // LiveKit's raw participant list), but only when something actually
+  // changed, not on a fixed interval.
   useEffect(() => {
     if (stage !== 'call' || joinState.role !== 'doctor') {
       return;
     }
 
     void onListParticipants();
-    const intervalId = window.setInterval(() => {
-      void onListParticipants();
-    }, 5000);
 
-    return () => window.clearInterval(intervalId);
-  }, [stage, joinState.role, onListParticipants]);
+    const handleParticipantsChanged = () => {
+      void onListParticipants();
+    };
+
+    room.on(RoomEvent.ParticipantConnected, handleParticipantsChanged);
+    room.on(RoomEvent.ParticipantDisconnected, handleParticipantsChanged);
+    room.on(RoomEvent.TrackMuted, handleParticipantsChanged);
+    room.on(RoomEvent.TrackUnmuted, handleParticipantsChanged);
+
+    return () => {
+      room.off(RoomEvent.ParticipantConnected, handleParticipantsChanged);
+      room.off(RoomEvent.ParticipantDisconnected, handleParticipantsChanged);
+      room.off(RoomEvent.TrackMuted, handleParticipantsChanged);
+      room.off(RoomEvent.TrackUnmuted, handleParticipantsChanged);
+    };
+  }, [stage, joinState.role, onListParticipants, room]);
 
   useEffect(() => {
-    if (!joinState.token || !joinState.expiresInSeconds || !joinState.tokenIssuedAt) {
+    if (!joinState.token || !joinState.expiresInSeconds || !joinState.tokenIssuedAt || stage === 'call') {
       return;
     }
 
@@ -1618,7 +1665,7 @@ function CallView({
     const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
 
     return () => window.clearInterval(intervalId);
-  }, [joinState.expiresInSeconds, joinState.token, joinState.tokenIssuedAt]);
+  }, [joinState.expiresInSeconds, joinState.token, joinState.tokenIssuedAt, stage]);
 
   useEffect(() => {
     if (stage !== 'preview' || !consultationExpiresAt) {
@@ -1888,7 +1935,9 @@ function CallView({
       </div>
       {joinState.role === 'doctor' && (
         <>
-          <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
+          {stage !== 'call' && (
+            <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
+          )}
           <ParticipantsPanel 
             participants={participants} 
             onRemoveParticipant={onRemoveParticipant}
