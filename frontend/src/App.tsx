@@ -11,7 +11,7 @@ import {
   useRoomContext,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
-import { ExternalE2EEKeyProvider, Room, Track, RoomEvent } from 'livekit-client';
+import { ExternalE2EEKeyProvider, Room, Track, RoomEvent, DisconnectReason } from 'livekit-client';
 import { MicOff, UserX } from 'lucide-react';
 import './App.css';
 
@@ -252,6 +252,7 @@ type CallViewProps = {
   onRequestJoinToken: (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => Promise<void>;
   onEndConsultation: () => void;
   onLeaveCall: () => void;
+  onRoomTerminatedRemotely: () => void;
   onReturnToJoinForm: (errorNotice?: ErrorNotice) => void;
   onStageChange: (stage: 'preview' | 'connecting' | 'call' | null) => void;
   onLockConsultation: () => Promise<void>;
@@ -292,6 +293,7 @@ type ConsultationController = {
   joinConsultation: () => Promise<void>;
   endConsultation: () => Promise<void>;
   leaveCall: () => void;
+  handleRoomTerminatedRemotely: () => void;
   returnToJoinForm: () => void;
   cancelWaiting: () => void;
   lockConsultation: () => Promise<void>;
@@ -371,6 +373,7 @@ function useConsultation(): ConsultationController {
   const [waitingRoomStatus, setWaitingRoomStatus] = useState<'waiting' | 'admitted' | 'denied' | null>(null);
   const [locked, setLocked] = useState(false);
   const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
+  const listParticipantsRequestSeq = useRef(0);
 
   const markConsultationEnded = useCallback((endedAt: string, notice: ErrorNotice) => {
     setConsultation((current) => {
@@ -391,6 +394,20 @@ function useConsultation(): ConsultationController {
 
     setJoinState((current) => (current === null ? current : null));
   }, []);
+
+  const handleRoomTerminatedRemotely = useCallback(() => {
+    if (!consultation || consultation.status === 'ended') {
+      return;
+    }
+
+    markConsultationEnded(consultation.expires_at, {
+      title: 'Consultation ended elsewhere',
+      message: callStage === 'call'
+        ? 'This consultation was ended while the call was active.'
+        : 'This consultation was ended while you were still setting up.',
+      suggestion: 'Request a new consultation ID if you need to rejoin.',
+    });
+  }, [consultation, callStage, markConsultationEnded]);
 
   const requestJson = useCallback(async <T,>(url: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(url, {
@@ -520,45 +537,13 @@ function useConsultation(): ConsultationController {
     }
   }, [consultationId, participantName, requestJson, role]);
 
-  const leaveCall = useCallback(async () => {
-    // Check if consultation was ended elsewhere (single check on disconnect, no polling)
-    if (consultation && consultation.status !== 'ended' && consultationId) {
-      try {
-        const response = await fetch(
-          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/status`,
-        );
-
-        if (response.ok) {
-          const data = await response.json() as {
-            consultation_id: string;
-            status: 'active' | 'ended';
-            ended_at: string | null;
-          };
-
-          if (data.status === 'ended') {
-            // Consultation was ended elsewhere
-            markConsultationEnded(data.ended_at ?? consultation.expires_at, {
-              title: 'Consultation ended elsewhere',
-              message: callStage === 'call'
-                ? 'This consultation was ended while the call was active.'
-                : 'This consultation was ended while you were still setting up.',
-              suggestion: 'Request a new consultation ID if you need to rejoin.',
-            });
-            return;
-          }
-        }
-      } catch {
-        // If check fails, fall through to normal leave behavior
-      }
-    }
-
-    // Normal voluntary leave
+  const leaveCall = useCallback(() => {
     setJoinState(null);
     setCallStage(null);
     setWaitingForAdmission(false);
     setWaitingRoomStatus(null);
     setStatus('Call ended. Request a fresh token to rejoin if the consultation is still active.');
-  }, [consultation, consultationId, callStage, markConsultationEnded]);
+  }, []);
 
   const returnToJoinForm = useCallback((errorNotice?: ErrorNotice) => {
     setJoinState(null);
@@ -632,6 +617,8 @@ function useConsultation(): ConsultationController {
       return;
     }
 
+    const requestId = ++listParticipantsRequestSeq.current;
+
     try {
       const response = await requestJson<ParticipantInfo[]>(
         `${API_URL}/api/consultations/${encodeURIComponent(consultationId.trim())}/participants`,
@@ -643,6 +630,13 @@ function useConsultation(): ConsultationController {
           }),
         },
       );
+
+      // Discard this response if a newer request has since been fired —
+      // requests can resolve out of order, and applying a stale one would
+      // make the participant count appear to lag behind or freeze.
+      if (requestId !== listParticipantsRequestSeq.current) {
+        return;
+      }
 
       setParticipants(response);
     } catch (e) {
@@ -969,6 +963,7 @@ function useConsultation(): ConsultationController {
     joinConsultation,
     endConsultation,
     leaveCall,
+    handleRoomTerminatedRemotely,
     returnToJoinForm,
     cancelWaiting,
     lockConsultation,
@@ -1577,6 +1572,7 @@ function CallView({
   onRequestJoinToken,
   onEndConsultation,
   onLeaveCall,
+  onRoomTerminatedRemotely,
   onReturnToJoinForm,
   onStageChange,
   onLockConsultation,
@@ -1639,8 +1635,12 @@ function CallView({
 
     void onListParticipants();
 
+    let debounceId: number | undefined;
     const handleParticipantsChanged = () => {
-      void onListParticipants();
+      window.clearTimeout(debounceId);
+      debounceId = window.setTimeout(() => {
+        void onListParticipants();
+      }, 300);
     };
 
     room.on(RoomEvent.ParticipantConnected, handleParticipantsChanged);
@@ -1649,6 +1649,7 @@ function CallView({
     room.on(RoomEvent.TrackUnmuted, handleParticipantsChanged);
 
     return () => {
+      window.clearTimeout(debounceId);
       room.off(RoomEvent.ParticipantConnected, handleParticipantsChanged);
       room.off(RoomEvent.ParticipantDisconnected, handleParticipantsChanged);
       room.off(RoomEvent.TrackMuted, handleParticipantsChanged);
@@ -1935,9 +1936,7 @@ function CallView({
       </div>
       {joinState.role === 'doctor' && (
         <>
-          {stage !== 'call' && (
-            <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
-          )}
+          <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
           <ParticipantsPanel 
             participants={participants} 
             onRemoveParticipant={onRemoveParticipant}
@@ -1979,7 +1978,14 @@ function CallView({
           token={undefined}
           video={false}
           audio={false}
-          onDisconnected={onLeaveCall}
+          onDisconnected={(reason) => {
+            if (reason === DisconnectReason.ROOM_DELETED || reason === DisconnectReason.PARTICIPANT_REMOVED) {
+              // Consultation was ended elsewhere
+              onRoomTerminatedRemotely();
+            }
+            // Always call onLeaveCall for cleanup
+            onLeaveCall();
+          }}
           data-lk-theme="default"
           style={{ height: '100%' }}
         >
@@ -2035,6 +2041,7 @@ function App() {
     joinConsultation,
     endConsultation,
     leaveCall,
+    handleRoomTerminatedRemotely,
     returnToJoinForm,
     cancelWaiting,
     lockConsultation,
@@ -2078,6 +2085,7 @@ function App() {
         onRequestJoinToken={joinConsultation}
         onEndConsultation={endConsultation}
         onLeaveCall={leaveCall}
+        onRoomTerminatedRemotely={handleRoomTerminatedRemotely}
         onReturnToJoinForm={returnToJoinForm}
         onStageChange={setCallStage}
         onLockConsultation={lockConsultation}
