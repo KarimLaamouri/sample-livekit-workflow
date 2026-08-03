@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import crud
+from auth import ActorAssertion, ActorContext, get_authorized_doctor, get_authorized_participant
 from database import AsyncSessionLocal, get_db
 from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel, get_e2ee_key
 
@@ -159,9 +160,8 @@ class TokenResponse(BaseModel):
     e2ee_key: str
 
 
-class EndConsultationRequest(BaseModel):
-    participant_name: str = Field(min_length=1, max_length=80)
-    role: Role
+class EndConsultationRequest(ActorAssertion):
+    pass
 
 
 class EndConsultationResponse(BaseModel):
@@ -184,14 +184,12 @@ class WaitingRoomEntry(BaseModel):
     requested_at: str
 
 
-class WaitingRoomActionPayload(BaseModel):
-    actor_name: str = Field(min_length=1, max_length=80)
-    actor_role: Role
+class WaitingRoomActionPayload(ActorAssertion):
+    pass
 
 
-class ModerationActionPayload(BaseModel):
-    participant_name: str = Field(min_length=1, max_length=80)
-    role: Role
+class ModerationActionPayload(ActorAssertion):
+    pass
 
 
 class LockConsultationResponse(BaseModel):
@@ -204,9 +202,7 @@ class ModerationActionResponse(BaseModel):
     tracks_muted: int | None = None
 
 
-class SendChatMessagePayload(BaseModel):
-    participant_name: str = Field(min_length=1, max_length=80)
-    role: Literal["doctor", "patient", "observer"]
+class SendChatMessagePayload(ActorAssertion):
     body: str = Field(min_length=1, max_length=3000)
 
 
@@ -919,7 +915,7 @@ async def get_consultation_status(
     consultation_id: str,
     session: AsyncSession = Depends(get_db),
 ) -> ConsultationStatusResponse:
-    consultation = await crud.get_consultation_or_404(session, consultation_id)
+    consultation = await crud.get_consultation_or_404(session, consultation_id, include_ended=True)
     return ConsultationStatusResponse(
         consultation_id=consultation.consultation_id,
         status=consultation.status,
@@ -1026,20 +1022,11 @@ async def list_waiting_room(
 async def admit_participant(
     consultation_id: str,
     participant_name: str,
-    payload: WaitingRoomActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> WaitingRoomEntry:
     """Doctor admits a waiting participant."""
     consultation = await crud.get_consultation_or_404(session, consultation_id)
-
-    if payload.actor_role != "doctor":
-        raise HTTPException(status_code=403, detail="Only doctor can admit participants")
-
-    ensure_role_allowed_for_consultation(
-        consultation,
-        participant_name=payload.actor_name,
-        role=payload.actor_role,
-    )
 
     entry = await crud.get_waiting_room_entry(
         session, consultation_id, participant_name, for_update=True
@@ -1055,7 +1042,7 @@ async def admit_participant(
         consultation_id=consultation_id,
         participant_name=participant_name,
         role=entry.role,
-        admitted_by=payload.actor_name,
+        admitted_by=actor.participant_name,
     )
 
     return WaitingRoomEntry(
@@ -1070,20 +1057,11 @@ async def admit_participant(
 async def deny_participant(
     consultation_id: str,
     participant_name: str,
-    payload: WaitingRoomActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> WaitingRoomEntry:
     """Doctor denies a waiting participant."""
     consultation = await crud.get_consultation_or_404(session, consultation_id)
-
-    if payload.actor_role != "doctor":
-        raise HTTPException(status_code=403, detail="Only doctor can deny participants")
-
-    ensure_role_allowed_for_consultation(
-        consultation,
-        participant_name=payload.actor_name,
-        role=payload.actor_role,
-    )
 
     entry = await crud.get_waiting_room_entry(
         session, consultation_id, participant_name, for_update=True
@@ -1099,7 +1077,7 @@ async def deny_participant(
         consultation_id=consultation_id,
         participant_name=participant_name,
         role=entry.role,
-        denied_by=payload.actor_name,
+        denied_by=actor.participant_name,
     )
 
     return WaitingRoomEntry(
@@ -1184,13 +1162,12 @@ async def create_consultation_token(
 )
 async def end_consultation(
     consultation_id: str,
-    payload: EndConsultationRequest,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> EndConsultationResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, include_ended=True, for_update=True
     )
-    require_doctor_actor(consultation, payload)
 
     if consultation.status == "ended":
         return _build_consultation_ended_response(consultation)
@@ -1198,7 +1175,7 @@ async def end_consultation(
     ended_at = await crud.set_consultation_ended_state(
         session,
         consultation,
-        ended_by=payload.participant_name,
+        ended_by=actor.participant_name,
     )
 
     if ended_at is None:
@@ -1211,7 +1188,7 @@ async def end_consultation(
         "consultation.ended",
         consultation_id=consultation_id,
         room_name=consultation.room_name,
-        ended_by=payload.participant_name,
+        ended_by=actor.participant_name,
     )
 
     return _build_consultation_ended_response(consultation)
@@ -1223,13 +1200,12 @@ async def end_consultation(
 )
 async def lock_consultation(
     consultation_id: str,
-    payload: ModerationActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> LockConsultationResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, for_update=True
     )
-    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     changed = await crud.set_consultation_locked(session, consultation, locked=True)
     if changed:
@@ -1238,7 +1214,7 @@ async def lock_consultation(
             "consultation.locked",
             consultation_id=consultation_id,
             room_name=consultation.room_name,
-            locked_by=payload.participant_name,
+            locked_by=actor.participant_name,
         )
 
     return LockConsultationResponse(
@@ -1253,13 +1229,12 @@ async def lock_consultation(
 )
 async def unlock_consultation(
     consultation_id: str,
-    payload: ModerationActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> LockConsultationResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, for_update=True
     )
-    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     changed = await crud.set_consultation_locked(session, consultation, locked=False)
     if changed:
@@ -1268,7 +1243,7 @@ async def unlock_consultation(
             "consultation.unlocked",
             consultation_id=consultation_id,
             room_name=consultation.room_name,
-            unlocked_by=payload.participant_name,
+            unlocked_by=actor.participant_name,
         )
 
     return LockConsultationResponse(
@@ -1283,11 +1258,10 @@ async def unlock_consultation(
 )
 async def list_participants(
     consultation_id: str,
-    payload: ModerationActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> list[ParticipantInfo]:
     consultation = await crud.get_consultation_or_404(session, consultation_id)
-    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     livekit_api_url = resolve_livekit_api_url()
     try:
@@ -1295,7 +1269,7 @@ async def list_participants(
             participants = await lkapi.room.list_participants(
                 api.ListParticipantsRequest(room=consultation.room_name)
             )
-            
+
             participant_infos = []
             for participant in participants.participants:
                 participant_data = _build_participant_audit_data_from_participant(participant)
@@ -1330,13 +1304,12 @@ async def list_participants(
 async def remove_participant(
     consultation_id: str,
     identity: str,
-    payload: ModerationActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> ModerationActionResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, for_update=True
     )
-    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     livekit_api_url = resolve_livekit_api_url()
     try:
@@ -1350,7 +1323,7 @@ async def remove_participant(
             "participant.removed_by_host",
             consultation_id=consultation_id,
             room_name=consultation.room_name,
-            removed_by=payload.participant_name,
+            removed_by=actor.participant_name,
             target_identity=identity,
         )
 
@@ -1374,13 +1347,12 @@ async def remove_participant(
 async def mute_participant(
     consultation_id: str,
     identity: str,
-    payload: ModerationActionPayload,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> ModerationActionResponse:
     consultation = await crud.get_consultation_or_404(
         session, consultation_id, for_update=True
     )
-    require_doctor_for_moderation(consultation, payload.participant_name, payload.role)
 
     livekit_api_url = resolve_livekit_api_url()
     try:
@@ -1426,7 +1398,7 @@ async def mute_participant(
             "participant.muted_by_host",
             consultation_id=consultation_id,
             room_name=consultation.room_name,
-            muted_by=payload.participant_name,
+            muted_by=actor.participant_name,
             target_identity=identity,
             tracks_muted=muted_count,
         )
@@ -1450,21 +1422,17 @@ async def mute_participant(
 async def send_chat_message(
     consultation_id: str,
     payload: SendChatMessagePayload,
+    actor: ActorContext = Depends(get_authorized_participant),
     session: AsyncSession = Depends(get_db),
 ) -> ChatMessageResponse:
     consultation = await crud.get_consultation_or_404(session, consultation_id)
-    ensure_role_allowed_for_consultation(
-        consultation,
-        participant_name=payload.participant_name,
-        role=payload.role,
-    )
 
     message = await crud.create_chat_message(
         session,
         consultation_id=consultation_id,
-        sender_identity=payload.participant_name,
-        sender_name=payload.participant_name,
-        sender_role=payload.role,
+        sender_identity=actor.participant_name,
+        sender_name=actor.participant_name,
+        sender_role=actor.role,
         body=payload.body,
     )
 
