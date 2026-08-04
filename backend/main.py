@@ -18,7 +18,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import crud
-from auth import ActorAssertion, ActorContext, get_authorized_doctor, get_authorized_participant
+from auth import (
+    ActorAssertion,
+    ActorContext,
+    authorize_doctor,
+    authorize_participant,
+    get_authorized_doctor,
+    get_authorized_participant,
+)
 from database import AsyncSessionLocal, get_db
 from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel, get_e2ee_key
 
@@ -1422,9 +1429,9 @@ async def mute_participant(
 async def send_chat_message(
     consultation_id: str,
     payload: SendChatMessagePayload,
-    actor: ActorContext = Depends(get_authorized_participant),
     session: AsyncSession = Depends(get_db),
 ) -> ChatMessageResponse:
+    actor = await authorize_participant(consultation_id, payload, session)
     consultation = await crud.get_consultation_or_404(session, consultation_id)
 
     message = await crud.create_chat_message(
@@ -1445,11 +1452,13 @@ async def send_chat_message(
     )
 
 
-@app.get("/api/consultations/{consultation_id}/chat")
+@app.post("/api/consultations/{consultation_id}/chat/history", response_model=list[ChatMessageResponse])
 async def list_chat_messages(
     consultation_id: str,
+    body: ActorAssertion,
     session: AsyncSession = Depends(get_db),
 ) -> list[ChatMessageResponse]:
+    actor = await authorize_participant(consultation_id, body, session)
     consultation = await crud.get_consultation_or_404(session, consultation_id, include_ended=True)
     messages = await crud.list_chat_messages(session, consultation_id)
 

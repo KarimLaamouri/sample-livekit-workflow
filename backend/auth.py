@@ -26,10 +26,8 @@ class ActorContext(BaseModel):
     role: Role
 
 
-async def get_authorized_doctor(
-    consultation_id: str,
-    body: ActorAssertion,
-    db: AsyncSession = Depends(get_db),
+async def authorize_doctor(
+    consultation_id: str, assertion: ActorAssertion, db: AsyncSession
 ) -> ActorContext:
     consultation = await crud.get_consultation_or_404(db, consultation_id)
 
@@ -37,10 +35,46 @@ async def get_authorized_doctor(
     # extraction once Tachafy's ecosystem auth service is wired in. Every
     # downstream route depends only on ActorContext, so nothing else needs
     # to change when this happens.
-    if body.role != Role.doctor or body.participant_name != consultation.doctor_name:
+    if assertion.role != Role.doctor or assertion.participant_name != consultation.doctor_name:
         raise HTTPException(status_code=403, detail={"code": "NOT_ASSIGNED_DOCTOR"})
 
-    return ActorContext(consultation_id=consultation_id, participant_name=body.participant_name, role=body.role)
+    return ActorContext(
+        consultation_id=consultation_id,
+        participant_name=assertion.participant_name,
+        role=assertion.role,
+    )
+
+
+async def get_authorized_doctor(
+    consultation_id: str,
+    body: ActorAssertion,
+    db: AsyncSession = Depends(get_db),
+) -> ActorContext:
+    return await authorize_doctor(consultation_id, body, db)
+
+
+async def authorize_participant(
+    consultation_id: str, assertion: ActorAssertion, db: AsyncSession
+) -> ActorContext:
+    """For routes any admitted participant (doctor or patient) can call, e.g. chat."""
+    consultation = await crud.get_consultation_or_404(db, consultation_id)
+
+    valid_doctor = assertion.role == Role.doctor and assertion.participant_name == consultation.doctor_name
+    valid_patient = assertion.role == Role.patient and assertion.participant_name == consultation.patient_name
+
+    # TODO(ecosystem-auth): same replacement note as authorize_doctor.
+    if assertion.role == Role.doctor and not valid_doctor:
+        raise HTTPException(status_code=403, detail={"code": "NOT_ASSIGNED_DOCTOR"})
+    if assertion.role == Role.patient and not valid_patient:
+        raise HTTPException(status_code=403, detail={"code": "NOT_ASSIGNED_PATIENT"})
+    if assertion.role not in (Role.doctor, Role.patient):
+        raise HTTPException(status_code=403, detail={"code": "NOT_ASSIGNED_PARTICIPANT"})
+
+    return ActorContext(
+        consultation_id=consultation_id,
+        participant_name=assertion.participant_name,
+        role=assertion.role,
+    )
 
 
 async def get_authorized_participant(
@@ -48,13 +82,4 @@ async def get_authorized_participant(
     body: ActorAssertion,
     db: AsyncSession = Depends(get_db),
 ) -> ActorContext:
-    """For routes any admitted participant (doctor or patient) can call, e.g. chat."""
-    consultation = await crud.get_consultation_or_404(db, consultation_id)
-
-    # TODO(ecosystem-auth): same replacement note as get_authorized_doctor.
-    valid_doctor = body.role == Role.doctor and body.participant_name == consultation.doctor_name
-    valid_patient = body.role == Role.patient and body.participant_name == consultation.patient_name
-    if not (valid_doctor or valid_patient):
-        raise HTTPException(status_code=403, detail={"code": "NOT_ASSIGNED_PARTICIPANT"})
-
-    return ActorContext(consultation_id=consultation_id, participant_name=body.participant_name, role=body.role)
+    return await authorize_participant(consultation_id, body, db)

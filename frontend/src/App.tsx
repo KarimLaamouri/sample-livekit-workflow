@@ -705,9 +705,13 @@ function useConsultation(): ConsultationController {
   const loadChatHistory = useCallback(async (id: string): Promise<ChatMessageResponse[]> => {
     try {
       const response = await requestJson<ChatMessageResponse[]>(
-        `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat`,
+        `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat/history`,
         {
-          method: 'GET',
+          method: 'POST',
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
         },
       );
       return response;
@@ -715,7 +719,7 @@ function useConsultation(): ConsultationController {
       console.error('Failed to load chat history:', e);
       return [];
     }
-  }, [requestJson]);
+  }, [joinState, requestJson]);
 
   const sendChatMessage = useCallback(async (id: string, body: string) => {
     if (!joinState || !id.trim()) {
@@ -1247,8 +1251,8 @@ function WaitingRoomPanel({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              actor_name: doctorName,
-              actor_role: 'doctor',
+              participant_name: doctorName,
+              role: 'doctor',
             }),
           },
         );
