@@ -255,16 +255,25 @@ async def create_audit_event(
     await session.flush()
     return event
 
-####################### TO DELETE ON PROD #####################
-async def list_audit_events(session: AsyncSession, limit: int = 200) -> list[AuditEvent]:
-    """List audit events, most recent first, up to the given limit."""
+
+async def list_audit_events_for_consultation(
+    session: AsyncSession,
+    consultation_id: str,
+    *,
+    limit: int = 50,
+    cursor: int | None = None,
+) -> list[AuditEvent]:
+    """Most-recent-first, keyset-paginated by id. `cursor` is the id of the
+    last event from the previous page; pass None for the first page."""
     stmt = (
         select(AuditEvent)
-        .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+        .where(AuditEvent.consultation_id == consultation_id)
+        .order_by(AuditEvent.id.desc())
         .limit(limit)
     )
+    if cursor is not None:
+        stmt = stmt.where(AuditEvent.id < cursor)
     return list((await session.execute(stmt)).scalars().all())
-####################### TO DELETE ON PROD #####################
 
 
 # --------------------------------------------------------------------------

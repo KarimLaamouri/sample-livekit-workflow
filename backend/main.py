@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Header, Request
+from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
@@ -34,7 +34,6 @@ load_dotenv()
 TOKEN_TTL_SECONDS = 2 * 60
 DEPARTURE_TIMEOUT = 120
 CONSULTATION_TTL_MINUTES = 60
-AUDIT_EVENTS_LIMIT = 200
 TRACK_TYPE_LABELS = {
     0: "audio",
     1: "video",
@@ -232,6 +231,18 @@ class ParticipantInfo(BaseModel):
     metadata: dict[str, Any] | None = None
     is_publisher: bool | None
     tracks: list[dict[str, Any]] | None
+
+
+class AuditEventResponse(BaseModel):
+    id: int
+    timestamp: str
+    event_type: str
+    details: dict | None
+
+
+class ConsultationHistoryResponse(BaseModel):
+    events: list[AuditEventResponse]
+    next_cursor: int | None
 
 
 def utc_now() -> datetime:
@@ -1474,6 +1485,34 @@ async def list_chat_messages(
     ]
 
 
+@app.post(
+    "/api/consultations/{consultation_id}/history",
+    response_model=ConsultationHistoryResponse,
+)
+async def get_consultation_history(
+    consultation_id: str,
+    actor: ActorContext = Depends(get_authorized_doctor),
+    limit: int = Query(50, le=100),
+    cursor: int | None = Query(None),
+    session: AsyncSession = Depends(get_db),
+) -> ConsultationHistoryResponse:
+    events = await crud.list_audit_events_for_consultation(
+        session, consultation_id, limit=limit, cursor=cursor
+    )
+    return ConsultationHistoryResponse(
+        events=[
+            AuditEventResponse(
+                id=e.id,
+                timestamp=e.timestamp.isoformat(),
+                event_type=e.event_type,
+                details=e.details,
+            )
+            for e in events
+        ],
+        next_cursor=events[-1].id if len(events) == limit else None,
+    )
+
+
 @app.post("/api/webhooks")
 async def livekit_webhook(
     request: Request,
@@ -1489,23 +1528,3 @@ async def livekit_webhook(
     await _record_webhook_audit(session, event, consultation)
 
     return {"status": "received"}
-
-####################### TO DELETE ON PROD #####################
-@app.get("/api/audit-events")
-async def list_audit_events(session: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
-    events = await crud.list_audit_events(session, limit=AUDIT_EVENTS_LIMIT)
-
-    serialized: list[dict[str, Any]] = []
-    for event in events:
-        payload: dict[str, Any] = {
-            "timestamp": event.timestamp.isoformat(),
-            "event_type": event.event_type,
-        }
-        if event.consultation_id is not None:
-            payload["consultation_id"] = event.consultation_id
-        if event.details:
-            payload.update(event.details)
-        serialized.append(payload)
-
-    return serialized
-####################### TO DELETE ON PROD #####################
