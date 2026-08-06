@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,8 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from encryption import blind_index
 from e2ee import current_e2ee_key_version
 from models import AuditEvent, ChatMessage, Consultation, ProcessedWebhookEvent, WaitingRoomEntry
-
-DEFAULT_AUDIT_LIMIT = 200
 
 
 def utc_now() -> datetime:
@@ -236,6 +236,14 @@ def _clean_audit_value(value: Any) -> Any:
     return value
 
 
+async def get_latest_row_hash(session: AsyncSession) -> str | None:
+    """Most recent row_hash by id (id is monotonic and race-safer than
+    timestamp for this purpose — two inserts in the same instant would
+    otherwise be ambiguous to order)."""
+    stmt = select(AuditEvent.row_hash).order_by(AuditEvent.id.desc()).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def create_audit_event(
     session: AsyncSession, event_type: str, **details: Any
 ) -> AuditEvent:
@@ -245,15 +253,53 @@ async def create_audit_event(
         for key, value in details.items()
         if value is not None
     }
+    cleaned_details = cleaned_details or None
+
+    timestamp = utc_now()  # set explicitly (overrides server_default) so the
+                            # hash can include the exact value being stored,
+                            # not a value the DB assigns after the fact
+
+    prev_hash = await get_latest_row_hash(session)
+    # Hash over PLAINTEXT content, not ciphertext — EncryptedJSON encrypts
+    # with a random nonce per call, so hashing post-encryption bytes would
+    # make the same content hash differently every time and the chain
+    # unverifiable against actual content.
+    payload = "|".join([
+        event_type,
+        consultation_id or "",
+        timestamp.isoformat(),
+        json.dumps(cleaned_details, sort_keys=True, default=str),
+    ])
+    row_hash = hashlib.sha256(f"{prev_hash or ''}{payload}".encode()).hexdigest()
 
     event = AuditEvent(
         event_type=event_type,
         consultation_id=consultation_id,
-        details=cleaned_details or None,
+        details=cleaned_details,
+        timestamp=timestamp,
+        prev_row_hash=prev_hash,
+        row_hash=row_hash,
     )
     session.add(event)
     await session.flush()
     return event
+
+# TODO(pre-production): anchor row_hash checkpoints to external storage
+# (e.g. OVHcloud Object Storage with Object Lock) on a schedule, using a
+# credential separate from the app's runtime DB role, so tampering by a
+# fully privileged DB actor is detectable — not just tampering by the app
+# role. Without this, someone with elevated DB access could still rewrite
+# the entire chain forward after altering one row, since the chain alone
+# only proves internal consistency, not consistency with anything outside
+# the database.
+
+# TODO(concurrency): get_latest_row_hash + insert is a read-then-write
+# without row locking. Concurrent audit writes (e.g. two routes firing
+# audit events in the same instant) could both read the same prev_hash and
+# produce two rows claiming the same predecessor, forking the chain rather
+# than corrupting it outright. Acceptable for current single-node
+# dev/low-concurrency use; revisit (e.g. SELECT ... FOR UPDATE on a
+# sentinel row, or a Postgres advisory lock) before production traffic.
 
 
 async def list_audit_events_for_consultation(

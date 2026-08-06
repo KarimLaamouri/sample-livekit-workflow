@@ -168,6 +168,8 @@ class AuditEvent(Base):
     # must never be lost if a consultation row is ever purged.
     consultation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     details: Mapped[dict | None] = mapped_column(EncryptedJSON, nullable=True)
+    row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    prev_row_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         Index("ix_audit_events_timestamp", "timestamp"),
