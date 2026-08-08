@@ -357,6 +357,7 @@ async def create_chat_message(
     sender_name: str,
     sender_role: str,
     body: str,
+    client_message_id: str | None = None,
 ) -> ChatMessage:
     message = ChatMessage(
         consultation_id=consultation_id,
@@ -364,6 +365,7 @@ async def create_chat_message(
         sender_name=sender_name,
         sender_role=sender_role,
         body=body,
+        client_message_id=client_message_id,
     )
     session.add(message)
     await session.flush()

@@ -65,6 +65,7 @@ type ChatMessageResponse = {
   sender_role: string;
   body: string;
   sent_at: string;
+  client_message_id: string | null; // Client-generated UUID for exact deduplication
 };
 
 type ParticipantInfo = {
@@ -261,7 +262,7 @@ type CallViewProps = {
   onRemoveParticipant: (identity: string) => Promise<void>;
   onMuteParticipant: (identity: string) => Promise<void>;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
-  onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
+  onSendChatMessage: (consultationId: string, body: string, clientMessageId: string) => Promise<void>;
 };
 
 type ConsultationController = {
@@ -721,7 +722,7 @@ function useConsultation(): ConsultationController {
     }
   }, [joinState, requestJson]);
 
-  const sendChatMessage = useCallback(async (id: string, body: string) => {
+  const sendChatMessage = useCallback(async (id: string, body: string, clientMessageId: string) => {
     if (!joinState || !id.trim()) {
       return;
     }
@@ -735,6 +736,7 @@ function useConsultation(): ConsultationController {
             participant_name: joinState.participantName,
             role: joinState.role,
             body: body,
+            client_message_id: clientMessageId,
           }),
         },
       );
@@ -1393,7 +1395,7 @@ function CustomChat({
 }: {
   consultationId: string;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
-  onSendChatMessage: (consultationId: string, body: string) => Promise<void>;
+  onSendChatMessage: (consultationId: string, body: string, clientMessageId: string) => Promise<void>;
   isOpen: boolean;
   onUnreadChange: (count: number) => void;
 }) {
@@ -1419,12 +1421,26 @@ function CustomChat({
     try {
       const messages = await onLoadChatHistory(consultationId);
 
-      // Merge new messages into historyMessages by identity (sender_identity + sent_at)
+      // Merge new messages into historyMessages with client_message_id-aware deduplication
       setHistoryMessages((prev) => {
-        const existingKeys = new Set(prev.map((msg) => `${msg.sender_identity}|${msg.sent_at}`));
-        const newMessages = messages.filter(
-          (msg) => !existingKeys.has(`${msg.sender_identity}|${msg.sent_at}`)
+        // Build sets for exact deduplication using client_message_id
+        const existingClientIds = new Set(
+          prev.map((msg) => msg.client_message_id).filter((id): id is string => id !== null)
         );
+        const existingFallbackKeys = new Set(
+          prev
+            .filter((msg) => msg.client_message_id === null)
+            .map((msg) => `${msg.sender_identity}|${msg.sent_at}`)
+        );
+
+        const newMessages = messages.filter((msg) => {
+          // If message has client_message_id, check exact match
+          if (msg.client_message_id !== null) {
+            return !existingClientIds.has(msg.client_message_id);
+          }
+          // Otherwise, use fallback heuristic (sender_identity + sent_at)
+          return !existingFallbackKeys.has(`${msg.sender_identity}|${msg.sent_at}`);
+        });
 
         // Merge and sort by sent_at
         const merged = [...prev, ...newMessages].sort(
@@ -1480,11 +1496,27 @@ function CustomChat({
     const body = draft.trim();
     if (!body || sending) return;
     setSending(true);
+    
+    // Generate a unique client-side message ID for exact deduplication
+    // crypto.randomUUID() is available in modern browsers and generates a UUID v4
+    const clientMessageId = crypto.randomUUID();
+    
     try {
-      // Send via LiveKit for real-time delivery (plaintext, encrypted by LiveKit)
-      await chat.send(body);
-      // Persist to backend (plaintext, encrypted at rest by server)
-      await onSendChatMessage(consultationId, body);
+      // Send via LiveKit for real-time delivery with client_message_id in attributes
+      // LiveKit 2.20.0 supports attributes in SendTextOptions, and @livekit/components-react 2.9.21 exposes this
+      await chat.send(body, { attributes: { client_message_id: clientMessageId } });
+      
+      // Persist to backend with the same client_message_id
+      // If backend call fails, the LiveKit message still goes through (don't vanish from sender's UI)
+      try {
+        await onSendChatMessage(consultationId, body, clientMessageId);
+      } catch (backendError) {
+        console.error('Failed to persist chat message to backend (LiveKit send succeeded):', backendError);
+        // Don't clear draft on backend failure so user can retry, but LiveKit message is already sent
+        setSending(false);
+        return;
+      }
+      
       setDraft('');
     } catch (e) {
       console.error('Failed to send chat message', e);
@@ -1493,23 +1525,76 @@ function CustomChat({
     }
   };
 
-  // Merge historical and live messages
-  const combined = [
-    ...historyMessages.map((m) => ({
-      id: `history-${m.sent_at}-${m.sender_identity}`,
-      from: m.sender_name,
-      message: m.body,
-      timestamp: new Date(m.sent_at).getTime(),
-      isLocal: false, // Historical messages are from others
-    })),
-    ...chat.chatMessages.map((m) => ({
-      id: m.id,
-      from: m.from?.name ?? m.from?.identity ?? 'Unknown',
-      message: m.message,
-      timestamp: m.timestamp,
-      isLocal: m.from?.isLocal ?? false,
-    })),
-  ].sort((a, b) => a.timestamp - b.timestamp);
+  // Merge historical and live messages with exact deduplication using client_message_id
+  const combined = useMemo(() => {
+    // Build a set of client_message_ids from historical messages for exact deduplication
+    const historyClientIds = new Set(
+      historyMessages
+        .map((m) => m.client_message_id)
+        .filter((id): id is string => id !== null)
+    );
+
+    // Helper function for fallback heuristic deduplication (name+body+15-second window)
+    // Used for messages without client_message_id (historical data before this feature)
+    const isDuplicateByHeuristic = (
+      liveMessage: { from: string; message: string; timestamp: number },
+      historyMessage: { sender_name: string; body: string; sent_at: string }
+    ) => {
+      const timeDiff = Math.abs(
+        liveMessage.timestamp - new Date(historyMessage.sent_at).getTime()
+      );
+      return (
+        liveMessage.from === historyMessage.sender_name &&
+        liveMessage.message === historyMessage.body &&
+        timeDiff < 15000 // 15-second window
+      );
+    };
+
+    // Filter live messages: exclude if client_message_id matches history, or if heuristic matches
+    const filteredLiveMessages = chat.chatMessages.filter((liveMsg) => {
+      const liveClientId = liveMsg.attributes?.client_message_id;
+      
+      // Exact deduplication: if we have a client_message_id and it's in history, skip this live message
+      if (liveClientId && historyClientIds.has(liveClientId)) {
+        return false;
+      }
+
+      // Fallback heuristic: for messages without client_message_id, use name+body+time-window
+      if (!liveClientId) {
+        return !historyMessages.some((historyMsg) =>
+          isDuplicateByHeuristic(
+            {
+              from: liveMsg.from?.name ?? liveMsg.from?.identity ?? 'Unknown',
+              message: liveMsg.message,
+              timestamp: liveMsg.timestamp,
+            },
+            historyMsg
+          )
+        );
+      }
+
+      // Keep live messages with client_message_id that aren't in history
+      return true;
+    });
+
+    // Combine and sort by timestamp
+    return [
+      ...historyMessages.map((m) => ({
+        id: `history-${m.sent_at}-${m.sender_identity}`,
+        from: m.sender_name,
+        message: m.body,
+        timestamp: new Date(m.sent_at).getTime(),
+        isLocal: false, // Historical messages are from others
+      })),
+      ...filteredLiveMessages.map((m) => ({
+        id: m.id,
+        from: m.from?.name ?? m.from?.identity ?? 'Unknown',
+        message: m.message,
+        timestamp: m.timestamp,
+        isLocal: m.from?.isLocal ?? false,
+      })),
+    ].sort((a, b) => a.timestamp - b.timestamp);
+  }, [historyMessages, chat.chatMessages]);
 
   // Track unread messages while the panel is closed; reset once it's opened.
   useEffect(() => {

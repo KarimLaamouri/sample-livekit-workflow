@@ -210,6 +210,7 @@ class ModerationActionResponse(BaseModel):
 
 class SendChatMessagePayload(ActorAssertion):
     body: str = Field(min_length=1, max_length=3000)
+    client_message_id: str | None = None  # Client-generated UUID for exact deduplication
 
 
 class ChatMessageResponse(BaseModel):
@@ -218,6 +219,7 @@ class ChatMessageResponse(BaseModel):
     sender_role: str
     body: str
     sent_at: str
+    client_message_id: str | None = None  # Client-generated UUID for exact deduplication
 
 
 class ParticipantInfo(BaseModel):
@@ -1452,6 +1454,7 @@ async def send_chat_message(
         sender_name=actor.participant_name,
         sender_role=actor.role,
         body=payload.body,
+        client_message_id=payload.client_message_id,
     )
 
     return ChatMessageResponse(
@@ -1460,6 +1463,7 @@ async def send_chat_message(
         sender_role=message.sender_role,
         body=message.body,
         sent_at=message.sent_at.isoformat(),
+        client_message_id=message.client_message_id,
     )
 
 
@@ -1480,6 +1484,7 @@ async def list_chat_messages(
             sender_role=msg.sender_role,
             body=msg.body,
             sent_at=msg.sent_at.isoformat(),
+            client_message_id=msg.client_message_id,
         )
         for msg in messages
     ]
