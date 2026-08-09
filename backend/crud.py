@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
+import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -359,17 +360,68 @@ async def create_chat_message(
     body: str,
     client_message_id: str | None = None,
 ) -> ChatMessage:
-    message = ChatMessage(
-        consultation_id=consultation_id,
-        sender_identity=sender_identity,
-        sender_name=sender_name,
-        sender_role=sender_role,
-        body=body,
-        client_message_id=client_message_id,
+    if client_message_id is None:
+        # No idempotency key supplied (e.g. legacy caller) — plain insert,
+        # unchanged from before this task.
+        message = ChatMessage(
+            consultation_id=consultation_id,
+            sender_identity=sender_identity,
+            sender_name=sender_name,
+            sender_role=sender_role,
+            body=body,
+            client_message_id=None,
+        )
+        session.add(message)
+        await session.flush()
+        return message
+
+    # Idempotent path: ON CONFLICT DO NOTHING against the partial unique
+    # index on (consultation_id, client_message_id) from migration 0009.
+    # This is atomic at the DB level — correct even if two requests with
+    # the same client_message_id arrive concurrently, which a
+    # check-then-insert in application code can never guarantee (there's
+    # always a race window between the check and the insert).
+    #
+    # ASSUMPTION: a retry is assumed to carry the same body as the
+    # original send under the same client_message_id. If a duplicate ID
+    # ever arrives with different content, this returns the ORIGINAL
+    # row's content, not the new one — that's the correct behavior for a
+    # genuine retry, not a bug.
+    stmt = (
+        pg_insert(ChatMessage)
+        .values(
+            consultation_id=consultation_id,
+            sender_identity=sender_identity,
+            sender_name=sender_name,
+            sender_role=sender_role,
+            body=body,
+            client_message_id=client_message_id,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["consultation_id", "client_message_id"],
+            # Must match migration 0009's postgresql_where predicate
+            # exactly (textually), or Postgres won't recognize this as
+            # the same conflict target and the statement will error.
+            index_where=sa.text("client_message_id IS NOT NULL"),
+        )
+        .returning(ChatMessage)
     )
-    session.add(message)
+    result = await session.execute(stmt)
+    inserted = result.scalar_one_or_none()
     await session.flush()
-    return message
+
+    if inserted is not None:
+        return inserted
+
+    # Conflict: a message with this client_message_id already exists for
+    # this consultation (a retry of an already-successful send). Return
+    # the existing row rather than raising — same request, same response,
+    # no duplicate, no crash.
+    existing_stmt = select(ChatMessage).where(
+        ChatMessage.consultation_id == consultation_id,
+        ChatMessage.client_message_id == client_message_id,
+    )
+    return (await session.execute(existing_stmt)).scalar_one()
 
 
 async def list_chat_messages(session: AsyncSession, consultation_id: str) -> list[ChatMessage]:
