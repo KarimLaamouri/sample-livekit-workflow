@@ -262,7 +262,12 @@ type CallViewProps = {
   onRemoveParticipant: (identity: string) => Promise<void>;
   onMuteParticipant: (identity: string) => Promise<void>;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
-  onSendChatMessage: (consultationId: string, body: string, clientMessageId: string) => Promise<void>;
+  onSendChatMessage: (
+    consultationId: string,
+    body: string,
+    clientMessageId: string,
+    senderIdentity: string,
+  ) => Promise<void>;
 };
 
 type ConsultationController = {
@@ -303,7 +308,12 @@ type ConsultationController = {
   removeParticipant: (identity: string) => Promise<void>;
   muteParticipant: (identity: string) => Promise<void>;
   loadChatHistory: (id: string) => Promise<ChatMessageResponse[]>;
-  sendChatMessage: (id: string, body: string) => Promise<void>;
+  sendChatMessage: (
+    id: string,
+    body: string,
+    clientMessageId: string,
+    senderIdentity: string,
+  ) => Promise<void>;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -704,14 +714,18 @@ function useConsultation(): ConsultationController {
   }, [consultationId, joinState, requestJson, listParticipants]);
 
   const loadChatHistory = useCallback(async (id: string): Promise<ChatMessageResponse[]> => {
+    const currentJoinState = joinState;
+    if (!currentJoinState) {
+      return [];
+    }
     try {
       const response = await requestJson<ChatMessageResponse[]>(
         `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat/history`,
         {
           method: 'POST',
           body: JSON.stringify({
-            participant_name: joinState.participantName,
-            role: joinState.role,
+            participant_name: currentJoinState.participantName,
+            role: currentJoinState.role,
           }),
         },
       );
@@ -722,28 +736,33 @@ function useConsultation(): ConsultationController {
     }
   }, [joinState, requestJson]);
 
-  const sendChatMessage = useCallback(async (id: string, body: string, clientMessageId: string) => {
-    if (!joinState || !id.trim()) {
-      return;
-    }
+  const sendChatMessage = useCallback(
+    async (id: string, body: string, clientMessageId: string, senderIdentity: string) => {
+      const currentJoinState = joinState;
+      if (!currentJoinState || !id.trim()) {
+        return;
+      }
 
-    try {
-      await requestJson<ChatMessageResponse>(
-        `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            participant_name: joinState.participantName,
-            role: joinState.role,
-            body: body,
-            client_message_id: clientMessageId,
-          }),
-        },
-      );
-    } catch (e) {
-      console.error('Failed to send chat message:', e);
-    }
-  }, [joinState, requestJson]);
+      try {
+        await requestJson<ChatMessageResponse>(
+          `${API_URL}/api/consultations/${encodeURIComponent(id.trim())}/chat`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              participant_name: currentJoinState.participantName,
+              role: currentJoinState.role,
+              body: body,
+              client_message_id: clientMessageId,
+              sender_identity: senderIdentity,
+            }),
+          },
+        );
+      } catch (e) {
+        console.error('Failed to send chat message:', e);
+      }
+    },
+    [joinState, requestJson],
+  );
 
   useEffect(() => {
     if (!consultation || consultation.status === 'ended') {
@@ -1395,7 +1414,12 @@ function CustomChat({
 }: {
   consultationId: string;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
-  onSendChatMessage: (consultationId: string, body: string, clientMessageId: string) => Promise<void>;
+  onSendChatMessage: (
+    consultationId: string,
+    body: string,
+    clientMessageId: string,
+    senderIdentity: string,
+  ) => Promise<void>;
   isOpen: boolean;
   onUnreadChange: (count: number) => void;
 }) {
@@ -1509,7 +1533,7 @@ function CustomChat({
       // Persist to backend with the same client_message_id
       // If backend call fails, the LiveKit message still goes through (don't vanish from sender's UI)
       try {
-        await onSendChatMessage(consultationId, body, clientMessageId);
+        await onSendChatMessage(consultationId, body, clientMessageId, room.localParticipant.identity);
       } catch (backendError) {
         console.error('Failed to persist chat message to backend (LiveKit send succeeded):', backendError);
         // Don't clear draft on backend failure so user can retry, but LiveKit message is already sent
@@ -1584,7 +1608,7 @@ function CustomChat({
         from: m.sender_name,
         message: m.body,
         timestamp: new Date(m.sent_at).getTime(),
-        isLocal: false, // Historical messages are from others
+        isLocal: m.sender_identity === room.localParticipant.identity,
       })),
       ...filteredLiveMessages.map((m) => ({
         id: m.id,
@@ -1594,7 +1618,7 @@ function CustomChat({
         isLocal: m.from?.isLocal ?? false,
       })),
     ].sort((a, b) => a.timestamp - b.timestamp);
-  }, [historyMessages, chat.chatMessages]);
+  }, [historyMessages, chat.chatMessages, room.localParticipant.identity]);
 
   // Track unread messages while the panel is closed; reset once it's opened.
   useEffect(() => {
