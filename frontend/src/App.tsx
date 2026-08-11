@@ -1149,44 +1149,28 @@ function WaitingRoomScreen({
       return;
     }
 
-    let cancelled = false;
+    const es = new EventSource(
+      `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/events`,
+    );
 
-    const pollStatus = async () => {
+    es.onmessage = (event) => {
       try {
-        const response = await fetch(
-          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/request`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ participant_name: participantName, role }),
-          },
-        );
-
-        if (!response.ok || cancelled) {
+        const entry = JSON.parse(event.data) as WaitingRoomEntryData;
+        if (entry.participant_name !== participantName) {
           return;
         }
-
-        const entry = (await response.json()) as WaitingRoomEntryData;
-
-        if (cancelled) {
-          return;
-        }
-
         if (entry.status === 'admitted') {
           onAdmitted();
         }
       } catch {
-        // Silently retry on next interval.
+        // Ignore malformed messages.
       }
     };
 
-    const intervalId = window.setInterval(pollStatus, 3000);
-
     return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
+      es.close();
     };
-  }, [consultationId, participantName, role, waitingRoomStatus, onAdmitted]);
+  }, [consultationId, participantName, waitingRoomStatus, onAdmitted]);
 
   return (
     <div className="call-shell">
@@ -1232,7 +1216,8 @@ function WaitingRoomPanel({
   useEffect(() => {
     let cancelled = false;
 
-    const poll = async () => {
+    // One-time fetch for the initial snapshot.
+    const fetchInitial = async () => {
       try {
         const response = await fetch(
           `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room`,
@@ -1248,16 +1233,48 @@ function WaitingRoomPanel({
           setEntries(data);
         }
       } catch {
-        // Silently retry on next interval.
+        // Will be picked up by SSE events.
       }
     };
 
-    void poll();
-    const intervalId = window.setInterval(poll, 4000);
+    void fetchInitial();
+
+    // SSE stream for real-time updates.
+    const es = new EventSource(
+      `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/events`,
+    );
+
+    es.onmessage = (event) => {
+      try {
+        const entry = JSON.parse(event.data) as WaitingRoomEntryData;
+
+        if (entry.status === 'waiting') {
+          // Upsert: add if new, replace if the same participant already exists.
+          setEntries((current) => {
+            const exists = current.some(
+              (e) => e.participant_name === entry.participant_name,
+            );
+            if (exists) {
+              return current.map((e) =>
+                e.participant_name === entry.participant_name ? entry : e,
+              );
+            }
+            return [...current, entry];
+          });
+        } else {
+          // admitted or denied — remove from the list.
+          setEntries((current) =>
+            current.filter((e) => e.participant_name !== entry.participant_name),
+          );
+        }
+      } catch {
+        // Ignore malformed messages.
+      }
+    };
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      es.close();
     };
   }, [consultationId]);
 

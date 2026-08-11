@@ -10,6 +10,7 @@ from typing import Any, Literal
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
@@ -101,6 +102,32 @@ async def lifespan(app: FastAPI):
             await sync_task
         except asyncio.CancelledError:
             pass
+
+
+# TODO(scaling): WaitingRoomHub is an in-process pub/sub — it only works
+# for a single backend process/worker.  If the app ever runs multiple
+# replicas, replace this with Postgres LISTEN/NOTIFY or Redis pub/sub.
+class WaitingRoomHub:
+    def __init__(self) -> None:
+        self._subscribers: dict[str, set[asyncio.Queue]] = {}
+
+    def subscribe(self, consultation_id: str) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        self._subscribers.setdefault(consultation_id, set()).add(queue)
+        return queue
+
+    def unsubscribe(self, consultation_id: str, queue: asyncio.Queue) -> None:
+        subs = self._subscribers.get(consultation_id)
+        if subs:
+            subs.discard(queue)
+            if not subs:
+                self._subscribers.pop(consultation_id, None)
+
+    async def publish(self, consultation_id: str, message: dict) -> None:
+        for queue in self._subscribers.get(consultation_id, ()):
+            await queue.put(message)
+
+waiting_room_hub = WaitingRoomHub()
 
 
 app = FastAPI(title="Tachafy Teleconsultation Demo", lifespan=lifespan)
@@ -1015,12 +1042,14 @@ async def request_waiting_room(
             auto=True,
         )
 
-    return WaitingRoomEntry(
+    result = WaitingRoomEntry(
         participant_name=payload.participant_name,
         role=payload.role,
         status=status,
         requested_at=entry.requested_at.isoformat(),
     )
+    await waiting_room_hub.publish(consultation_id, result.model_dump())
+    return result
 
 
 @app.get("/api/consultations/{consultation_id}/waiting-room", response_model=list[WaitingRoomEntry])
@@ -1041,6 +1070,22 @@ async def list_waiting_room(
         )
         for entry in entries
     ]
+
+
+@app.get("/api/consultations/{consultation_id}/waiting-room/events")
+async def waiting_room_events(consultation_id: str) -> StreamingResponse:
+    """SSE stream of waiting-room state changes for a consultation."""
+    queue = waiting_room_hub.subscribe(consultation_id)
+
+    async def event_stream():
+        try:
+            while True:
+                message = await queue.get()
+                yield f"data: {json.dumps(message)}\n\n"
+        finally:
+            waiting_room_hub.unsubscribe(consultation_id, queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/consultations/{consultation_id}/waiting-room/{participant_name}/admit", response_model=WaitingRoomEntry)
@@ -1070,12 +1115,14 @@ async def admit_participant(
         admitted_by=actor.participant_name,
     )
 
-    return WaitingRoomEntry(
+    result = WaitingRoomEntry(
         participant_name=participant_name,
         role=entry.role,
         status="admitted",
         requested_at=entry.requested_at.isoformat(),
     )
+    await waiting_room_hub.publish(consultation_id, result.model_dump())
+    return result
 
 
 @app.post("/api/consultations/{consultation_id}/waiting-room/{participant_name}/deny", response_model=WaitingRoomEntry)
@@ -1105,12 +1152,14 @@ async def deny_participant(
         denied_by=actor.participant_name,
     )
 
-    return WaitingRoomEntry(
+    result = WaitingRoomEntry(
         participant_name=participant_name,
         role=entry.role,
         status="denied",
         requested_at=entry.requested_at.isoformat(),
     )
+    await waiting_room_hub.publish(consultation_id, result.model_dump())
+    return result
 
 
 @app.post("/api/consultations/{consultation_id}/token", response_model=TokenResponse)
