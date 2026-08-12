@@ -257,14 +257,14 @@ class ChatMessageResponse(BaseModel):
 class ParticipantInfo(BaseModel):
     participant_id: str
     identity: str
-    role: str | None
-    name: str | None
+    role: str | None = None
+    name: str | None = None
     tag: str | None = None
-    state: str | None
-    joined_at: str | None
+    state: str | None = None
+    joined_at: str | None = None
     metadata: dict[str, Any] | None = None
-    is_publisher: bool | None
-    tracks: list[dict[str, Any]] | None
+    is_publisher: bool | None = None
+    tracks: list[dict[str, Any]] | None = None
 
 
 class AuditEventResponse(BaseModel):
