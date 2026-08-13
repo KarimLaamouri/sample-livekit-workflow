@@ -1537,16 +1537,16 @@ function CustomChat({
     const body = draft.trim();
     if (!body || sending) return;
     setSending(true);
-    
+
     // Generate a unique client-side message ID for exact deduplication
     // crypto.randomUUID() is available in modern browsers and generates a UUID v4
     const clientMessageId = crypto.randomUUID();
-    
+
     try {
       // Send via LiveKit for real-time delivery with client_message_id in attributes
       // LiveKit 2.20.0 supports attributes in SendTextOptions, and @livekit/components-react 2.9.21 exposes this
       await chat.send(body, { attributes: { client_message_id: clientMessageId } });
-      
+
       // Persist to backend with the same client_message_id
       // If backend call fails, the LiveKit message still goes through (don't vanish from sender's UI)
       try {
@@ -1557,7 +1557,7 @@ function CustomChat({
         setSending(false);
         return;
       }
-      
+
       setDraft('');
     } catch (e) {
       console.error('Failed to send chat message', e);
@@ -1594,7 +1594,7 @@ function CustomChat({
     // Filter live messages: exclude if client_message_id matches history, or if heuristic matches
     const filteredLiveMessages = chat.chatMessages.filter((liveMsg) => {
       const liveClientId = liveMsg.attributes?.client_message_id;
-      
+
       // Exact deduplication: if we have a client_message_id and it's in history, skip this live message
       if (liveClientId && historyClientIds.has(liveClientId)) {
         return false;
@@ -1742,6 +1742,7 @@ function CallView({
   const observerTokenRequested = useRef(false);
   const readyToConnect = skipPreview || deviceChoices !== null;
   const onRequestJoinTokenRef = useRef(onRequestJoinToken);
+  const connectPromiseRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     onRequestJoinTokenRef.current = onRequestJoinToken;
@@ -1858,36 +1859,31 @@ function CallView({
       return;
     }
 
-    let cancelled = false;
+    if (connectPromiseRef.current) {
+      return; // already attempted (or attempting) — nothing more to do here
+    }
 
-    const connectRoom = async () => {
-      setConnectionNotice(null);
-      setConnectionAction(null);
+    setConnectionNotice(null);
+    setConnectionAction(null);
+
+    const promise = (async () => {
       await keyProvider.setKey(e2eeKey);
       await room.setE2EEEnabled(true);
-
-      if (cancelled) {
-        return;
-      }
-
       await room.connect(LIVEKIT_URL, token);
-
-      if (cancelled) {
-        return;
-      }
-
       if (deviceChoices) {
         await room.localParticipant.setCameraEnabled(deviceChoices.videoEnabled, { deviceId: deviceChoices.videoDeviceId });
         await room.localParticipant.setMicrophoneEnabled(deviceChoices.audioEnabled, { deviceId: deviceChoices.audioDeviceId });
       }
+    })();
 
-      if (!cancelled) {
+    connectPromiseRef.current = promise;
+
+    promise
+      .then(() => {
         setStage('call');
-      }
-    };
-
-    void connectRoom().catch((error) => {
-      if (!cancelled) {
+      })
+      .catch((error) => {
+        connectPromiseRef.current = null; // clear so a retry can actually re-attempt
         if (isTokenConnectionError(error)) {
           setConnectionNotice({
             title: 'Your session timed out before connecting',
@@ -1907,15 +1903,9 @@ function CallView({
           setConnectionNotice(notice);
           setConnectionAction(() => () => onReturnToJoinForm(notice));
         }
-
         setStage('preview');
         room.disconnect();
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
+      });
   }, [
     readyToConnect,
     skipPreview,
@@ -2040,10 +2030,10 @@ function CallView({
         <div className="call-strip-actions">
           {joinState.role === 'doctor' && (
             <>
-              <button 
-                type="button" 
-                className={`lock-button ${locked ? 'locked' : ''}`} 
-                onClick={() => locked ? void onUnlockConsultation() : void onLockConsultation()} 
+              <button
+                type="button"
+                className={`lock-button ${locked ? 'locked' : ''}`}
+                onClick={() => locked ? void onUnlockConsultation() : void onLockConsultation()}
                 disabled={busy}
               >
                 {locked ? '🔒 Unlock' : '🔓 Lock'}
@@ -2067,8 +2057,8 @@ function CallView({
       {joinState.role === 'doctor' && (
         <>
           <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
-          <ParticipantsPanel 
-            participants={participants} 
+          <ParticipantsPanel
+            participants={participants}
             onRemoveParticipant={onRemoveParticipant}
             onMuteParticipant={onMuteParticipant}
           />
