@@ -1713,22 +1713,35 @@ function CallView({
   onLoadChatHistory,
   onSendChatMessage,
 }: CallViewProps) {
-  const { room, keyProvider } = useMemo(() => {
+  const roomStateRef = useRef<{
+    room: Room;
+    keyProvider: ExternalE2EEKeyProvider;
+    worker: Worker;
+  } | null>(null);
+
+  if (roomStateRef.current === null) {
     const keyProvider = new ExternalE2EEKeyProvider();
     const worker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
       type: 'module',
     });
-
-    return {
+    roomStateRef.current = {
       keyProvider,
-      room: new Room({
-        encryption: {
-          keyProvider,
-          worker,
-        },
-      }),
+      worker,
+      room: new Room({ encryption: { keyProvider, worker } }),
     };
-  }, []);
+  }
+
+  const { room, keyProvider, worker } = roomStateRef.current;
+
+  useEffect(() => {
+    const handleDisconnected = () => {
+      worker.terminate();
+    };
+    room.on(RoomEvent.Disconnected, handleDisconnected);
+    return () => {
+      room.off(RoomEvent.Disconnected, handleDisconnected);
+    };
+  }, [room, worker]);
 
   const skipPreview = joinState.role === 'observer';
   const [stage, setStage] = useState<'preview' | 'connecting' | 'call'>(skipPreview ? 'connecting' : 'preview');
