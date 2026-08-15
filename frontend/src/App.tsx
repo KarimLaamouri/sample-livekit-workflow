@@ -1757,6 +1757,21 @@ function CallView({
   const onRequestJoinTokenRef = useRef(onRequestJoinToken);
   const connectPromiseRef = useRef<Promise<void> | null>(null);
 
+  // Disconnect the room whenever CallView unmounts for any reason other
+  // than the explicit "Leave" button or the connect effect's own failure
+  // path (both already call room.disconnect() elsewhere). Clearing
+  // connectPromiseRef here too makes this self-healing: if this fires
+  // spuriously (e.g. React StrictMode's dev-only synthetic
+  // mount->cleanup->remount), the connect effect below sees a cleared
+  // ref and reconnects automatically on the following render instead of
+  // being permanently blocked by its own "already attempted" guard.
+  useEffect(() => {
+    return () => {
+      connectPromiseRef.current = null;
+      room.disconnect();
+    };
+  }, [room]);
+
   useEffect(() => {
     onRequestJoinTokenRef.current = onRequestJoinToken;
   }, [onRequestJoinToken]);
