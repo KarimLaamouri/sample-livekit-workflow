@@ -1498,6 +1498,11 @@ async def send_chat_message(
     payload: SendChatMessagePayload,
     session: AsyncSession = Depends(get_db),
 ) -> ChatMessageResponse:
+    """
+    TRUST MODEL: Chat persistence is an explicit part of the trust model and 
+    is subject to GDPR data retention policies. Chat messages are saved to 
+    the database for record-keeping.
+    """
     actor = await authorize_participant(consultation_id, payload, session)
     consultation = await crud.get_consultation_or_404(session, consultation_id)
 

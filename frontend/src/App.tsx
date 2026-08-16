@@ -12,7 +12,7 @@ import {
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { ExternalE2EEKeyProvider, Room, Track, RoomEvent, DisconnectReason } from 'livekit-client';
-import { MicOff, UserX } from 'lucide-react';
+import { MicOff, UserX, Lock } from 'lucide-react';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -1080,7 +1080,7 @@ function CreateConsultationPanel({
         Patient name
         <input value={patientName} onChange={(event) => onPatientNameChange(event.target.value)} />
       </label>
-      <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Create secure room'}</button>
+      <button type="submit" disabled={busy}>{busy ? 'Working...' : 'Create provider-managed room'}</button>
     </form>
   );
 }
@@ -1192,6 +1192,9 @@ function WaitingRoomScreen({
             <p className="waiting-room-heading">Waiting for the doctor to admit you</p>
             <p className="waiting-room-subtext">
               The doctor has not joined yet or hasn't admitted you. You'll be moved to the device check automatically once approved.
+            </p>
+            <p className="waiting-room-subtext" style={{ fontSize: '0.85em', opacity: 0.8, marginTop: '1rem' }}>
+              For your care and safety, chat messages are saved to your medical record. Calls are encrypted in transit and mediated securely by our servers.
             </p>
             <button type="button" className="waiting-room-back" onClick={onCancel}>
               Cancel
@@ -1654,6 +1657,12 @@ function CustomChat({
         <h3>Chat</h3>
       </div>
       <div className="custom-chat-messages">
+        {/* Enhanced inline system notification */}
+        <div className="custom-chat-system-notice">
+          <Lock className="custom-chat-system-notice-icon" size={14} />
+          <span>For your care and safety, chat messages are securely logged to your consultation record.</span>
+        </div>
+
         {loading ? (
           <div className="custom-chat-loading">Loading messages...</div>
         ) : combined.length === 0 ? (
@@ -1720,6 +1729,7 @@ function CallView({
   } | null>(null);
 
   if (roomStateRef.current === null) {
+    // Keys are supplied by the backend, meaning media is secure against external network interception but readable by the server environment.
     const keyProvider = new ExternalE2EEKeyProvider();
     const worker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
       type: 'module',
@@ -2114,9 +2124,11 @@ function CallView({
           <div className="connecting-overlay" role="status" aria-live="polite">
             <span className="spinner" aria-hidden="true" />
             <p>
-              {tokenCountdown
-                ? `Connecting to the secure room. Token expires in ${tokenCountdown}.`
-                : 'Connecting to the secure room…'}
+              <span className="join-status">
+                {joinState.expiresInSeconds !== null && tokenCountdown !== null
+                  ? `Connecting to your provider-managed room. Token expires in ${tokenCountdown}.`
+                  : 'Connecting to your provider-managed room...'}
+              </span>
             </p>
           </div>
         )}

@@ -1,5 +1,10 @@
 """Versioned E2EE key derivation for LiveKit media encryption.
 
+**TRUST MODEL: Server-Mediated Encryption Model, NOT Zero-Knowledge.**
+The server intentionally retains the ability to derive room keys for compliance,
+moderation, or auditing purposes. Media is secure against external interception
+but can be decrypted by the server environment if necessary.
+
 This module manages a SEPARATE secret namespace from DATABASE_ENCRYPTION_KEY
 and DATABASE_BLIND_INDEX_KEY (which live in encryption.py). The secrets loaded
 here must NOT be the same values as those keys.

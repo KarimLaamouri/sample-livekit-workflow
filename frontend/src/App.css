@@ -742,6 +742,27 @@ button[type='submit']::after {
   color: var(--shell-strip-fg);
 }
 
+.custom-chat-system-notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 0 12px 0;
+  padding: 10px 14px;
+  background: rgba(243, 238, 229, 0.05);
+  border: 1px solid rgba(243, 238, 229, 0.12);
+  border-radius: 8px;
+  color: rgba(243, 238, 229, 0.85);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.custom-chat-system-notice-icon {
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+
 .custom-chat-messages {
   flex: 1;
   overflow-y: auto;
