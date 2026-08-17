@@ -1080,8 +1080,11 @@ async def waiting_room_events(consultation_id: str) -> StreamingResponse:
     async def event_stream():
         try:
             while True:
-                message = await queue.get()
-                yield f"data: {json.dumps(message)}\n\n"
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"data: {json.dumps(message)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
         finally:
             waiting_room_hub.unsubscribe(consultation_id, queue)
 
