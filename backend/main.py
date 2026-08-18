@@ -1052,9 +1052,10 @@ async def request_waiting_room(
     return result
 
 
-@app.get("/api/consultations/{consultation_id}/waiting-room", response_model=list[WaitingRoomEntry])
+@app.post("/api/consultations/{consultation_id}/waiting-room", response_model=list[WaitingRoomEntry])
 async def list_waiting_room(
     consultation_id: str,
+    actor: ActorContext = Depends(get_authorized_doctor),
     session: AsyncSession = Depends(get_db),
 ) -> list[WaitingRoomEntry]:
     """Return all pending (waiting) entries — used by the doctor to poll."""

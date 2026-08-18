@@ -1224,6 +1224,14 @@ function WaitingRoomPanel({
       try {
         const response = await fetch(
           `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              participant_name: doctorName,
+              role: 'doctor',
+            }),
+          },
         );
 
         if (!response.ok || cancelled) {
