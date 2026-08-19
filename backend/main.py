@@ -22,8 +22,6 @@ import crud
 from auth import (
     ActorAssertion,
     ActorContext,
-    authorize_doctor,
-    authorize_participant,
     get_authorized_doctor,
     get_authorized_participant,
 )
@@ -1507,7 +1505,10 @@ async def send_chat_message(
     is subject to GDPR data retention policies. Chat messages are saved to 
     the database for record-keeping.
     """
-    actor = await authorize_participant(consultation_id, payload, session)
+    # payload already IS an ActorAssertion (SendChatMessagePayload extends it) plus
+    # content fields in the same body — can't use Depends(get_authorized_participant)
+    # here without splitting the body into two nested keys, so call it directly.
+    actor = await get_authorized_participant(consultation_id, payload, session)
     consultation = await crud.get_consultation_or_404(session, consultation_id)
 
     message = await crud.create_chat_message(
@@ -1533,10 +1534,9 @@ async def send_chat_message(
 @app.post("/api/consultations/{consultation_id}/chat/history", response_model=list[ChatMessageResponse])
 async def list_chat_messages(
     consultation_id: str,
-    body: ActorAssertion,
+    actor: ActorContext = Depends(get_authorized_participant),
     session: AsyncSession = Depends(get_db),
 ) -> list[ChatMessageResponse]:
-    actor = await authorize_participant(consultation_id, body, session)
     consultation = await crud.get_consultation_or_404(session, consultation_id, include_ended=True)
     messages = await crud.list_chat_messages(session, consultation_id)
 
