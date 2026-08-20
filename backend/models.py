@@ -148,7 +148,7 @@ class WaitingRoomEntry(Base):
     __table_args__ = (
         UniqueConstraint("consultation_id", "participant_name_hash", name="uq_waiting_room_participant"),
         CheckConstraint(
-            "status IN ('waiting', 'admitted', 'denied')", name="ck_waiting_room_status"
+            "status IN ('waiting', 'admitted', 'denied', 'cancelled')", name="ck_waiting_room_status"
         ),
         CheckConstraint("role IN ('doctor', 'patient', 'observer')", name="ck_waiting_room_role"),
         Index("ix_waiting_room_consultation_status", "consultation_id", "status"),
