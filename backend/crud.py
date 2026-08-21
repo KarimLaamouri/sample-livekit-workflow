@@ -211,9 +211,11 @@ async def list_waiting_entries(
 
 
 async def set_waiting_room_status(
-    session: AsyncSession, entry: WaitingRoomEntry, status: str
+    session: AsyncSession, entry: WaitingRoomEntry, status: str, *, refresh_timestamp: bool = False
 ) -> WaitingRoomEntry:
     entry.status = status
+    if refresh_timestamp:
+        entry.requested_at = utc_now()
     await session.flush()
     return entry
 

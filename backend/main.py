@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 Role = Literal["doctor", "patient", "observer"]
 ConsultationStatus = Literal["active", "ended"]
-WaitingRoomStatus = Literal["waiting", "admitted", "denied"]
+WaitingRoomStatus = Literal["waiting", "admitted", "denied", "cancelled"]
 
 
 async def background_sync_loop():
@@ -997,11 +997,35 @@ async def request_waiting_room(
         role=payload.role,
     )
 
-    # If participant already has an entry, return its current state.
+    # If participant already has an entry, return its current state, unless it was cancelled.
     existing = await crud.get_waiting_room_entry(
         session, consultation_id, payload.participant_name
     )
     if existing is not None:
+        if existing.status == "cancelled":
+            doctor_present = await _is_doctor_in_room(consultation.room_name)
+            new_status: WaitingRoomStatus = "admitted" if doctor_present else "waiting"
+
+            await crud.set_waiting_room_status(session, existing, new_status, refresh_timestamp=True)
+
+            await crud.create_audit_event(
+                session,
+                "waiting_room.requested",
+                consultation_id=consultation_id,
+                participant_name=payload.participant_name,
+                role=existing.role,
+                status=new_status,
+            )
+
+            result = WaitingRoomEntry(
+                participant_name=payload.participant_name,
+                role=existing.role,
+                status=new_status,
+                requested_at=existing.requested_at.isoformat(),
+            )
+            await waiting_room_hub.publish(consultation_id, result.model_dump())
+            return result
+
         return WaitingRoomEntry(
             participant_name=payload.participant_name,
             role=existing.role,
@@ -1158,6 +1182,60 @@ async def deny_participant(
         participant_name=participant_name,
         role=entry.role,
         status="denied",
+        requested_at=entry.requested_at.isoformat(),
+    )
+    await waiting_room_hub.publish(consultation_id, result.model_dump())
+    return result
+
+
+@app.post("/api/consultations/{consultation_id}/waiting-room/{participant_name}/cancel", response_model=WaitingRoomEntry)
+async def cancel_waiting_room(
+    consultation_id: str,
+    participant_name: str,
+    payload: WaitingRoomRequestPayload,
+    session: AsyncSession = Depends(get_db),
+) -> WaitingRoomEntry:
+    """Patient cancels their own waiting-room request.
+
+    Uses the same unauthenticated body-payload pattern as request_waiting_room
+    (the patient has no JWT/actor assertion at this pre-admission stage).
+    """
+    # TODO(abandoned): this only handles explicit cancellation (user clicks
+    # "Cancel"). If the user closes the tab / loses connectivity without
+    # clicking cancel, the entry stays status="waiting" until a TTL or
+    # heartbeat mechanism cleans it up — out of scope for now.
+    await crud.get_consultation_or_404(session, consultation_id)
+
+    entry = await crud.get_waiting_room_entry(
+        session, consultation_id, participant_name, for_update=True
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Participant not found in waiting room")
+
+    # Only transition from "waiting" → "cancelled". If already
+    # admitted/denied/cancelled, return the current state idempotently.
+    if entry.status != "waiting":
+        return WaitingRoomEntry(
+            participant_name=participant_name,
+            role=entry.role,
+            status=entry.status,
+            requested_at=entry.requested_at.isoformat(),
+        )
+
+    await crud.set_waiting_room_status(session, entry, "cancelled")
+
+    await crud.create_audit_event(
+        session,
+        "waiting_room.cancelled",
+        consultation_id=consultation_id,
+        participant_name=participant_name,
+        role=entry.role,
+    )
+
+    result = WaitingRoomEntry(
+        participant_name=participant_name,
+        role=entry.role,
+        status="cancelled",
         requested_at=entry.requested_at.isoformat(),
     )
     await waiting_room_hub.publish(consultation_id, result.model_dump())

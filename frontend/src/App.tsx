@@ -55,7 +55,7 @@ type ErrorNotice = {
 type WaitingRoomEntryData = {
   participant_name: string;
   role: Role;
-  status: 'waiting' | 'admitted' | 'denied';
+  status: 'waiting' | 'admitted' | 'denied' | 'cancelled';
   requested_at: string;
 };
 
@@ -283,7 +283,8 @@ type ConsultationController = {
   sessionNotice: ErrorNotice | null;
   busy: boolean;
   waitingForAdmission: boolean;
-  waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | null;
+  waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | 'cancelled' | null;
+  setWaitingRoomStatus: (value: 'waiting' | 'admitted' | 'denied' | 'cancelled' | null) => void;
   locked: boolean;
   participants: ParticipantInfo[];
   setCallStage: (stage: 'preview' | 'connecting' | 'call' | null) => void;
@@ -302,6 +303,7 @@ type ConsultationController = {
   handleRoomTerminatedRemotely: () => void;
   returnToJoinForm: () => void;
   cancelWaiting: () => void;
+  resetWaitingRoomUiState: () => void;
   lockConsultation: () => Promise<void>;
   unlockConsultation: () => Promise<void>;
   listParticipants: () => Promise<void>;
@@ -381,7 +383,7 @@ function useConsultation(): ConsultationController {
   const [sessionNotice, setSessionNotice] = useState<ErrorNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const [waitingForAdmission, setWaitingForAdmission] = useState(false);
-  const [waitingRoomStatus, setWaitingRoomStatus] = useState<'waiting' | 'admitted' | 'denied' | null>(null);
+  const [waitingRoomStatus, setWaitingRoomStatus] = useState<'waiting' | 'admitted' | 'denied' | 'cancelled' | null>(null);
   const [locked, setLocked] = useState(false);
   const [participants, setParticipants] = useState<ParticipantInfo[]>([]);
   const listParticipantsRequestSeq = useRef(0);
@@ -433,13 +435,35 @@ function useConsultation(): ConsultationController {
     return response.json() as Promise<T>;
   }, []);
 
-  const cancelWaiting = useCallback(() => {
+  const resetWaitingRoomUiState = useCallback(() => {
     setWaitingForAdmission(false);
     setWaitingRoomStatus(null);
     setJoinState(null);
     setCallStage(null);
     setStatus('Join the consultation again from the form.');
-  }, []);
+  }, [setCallStage, setJoinState, setStatus, setWaitingForAdmission, setWaitingRoomStatus]);
+
+  const cancelWaiting = useCallback(() => {
+    // Best-effort notify the backend so the doctor's waiting-room list updates
+    // in real time. Fire-and-forget: don't block the UI transition on it.
+    if (joinState) {
+      fetch(
+        `${API_URL}/api/consultations/${encodeURIComponent(joinState.consultationId)}/waiting-room/${encodeURIComponent(joinState.participantName)}/cancel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            participant_name: joinState.participantName,
+            role: joinState.role,
+          }),
+        },
+      ).catch(() => {
+        // Ignore — the user is leaving anyway.
+      });
+    }
+
+    resetWaitingRoomUiState();
+  }, [joinState, resetWaitingRoomUiState]);
 
   const beginJoinSession = useCallback(async () => {
     const id = consultationId.trim();
@@ -523,7 +547,20 @@ function useConsultation(): ConsultationController {
           return;
         }
 
-        // status === 'admitted' — fall through to normal join flow.
+        if (wrResponse.status === 'admitted') {
+          // status === 'admitted' — fall through to normal join flow.
+        } else {
+          setWaitingForAdmission(false);
+          setJoinState(null);
+          setWaitingRoomStatus(null);
+          setErrorNotice({
+            title: 'Request Error',
+            message: 'Something went wrong with your request. Please try again.',
+            suggestion: 'Return to the form and rejoin.',
+          });
+          setStatus('Unable to join the waiting room.');
+          return;
+        }
       }
 
       setJoinState({
@@ -973,6 +1010,7 @@ function useConsultation(): ConsultationController {
     busy,
     waitingForAdmission,
     waitingRoomStatus,
+    setWaitingRoomStatus,
     locked,
     participants,
     setCallStage,
@@ -991,6 +1029,7 @@ function useConsultation(): ConsultationController {
     handleRoomTerminatedRemotely,
     returnToJoinForm,
     cancelWaiting,
+    resetWaitingRoomUiState,
     lockConsultation,
     unlockConsultation,
     listParticipants,
@@ -1136,13 +1175,17 @@ function WaitingRoomScreen({
   waitingRoomStatus,
   onCancel,
   onAdmitted,
+  onDenied,
+  onCancelled,
 }: {
   consultationId: string;
   participantName: string;
   role: Role;
-  waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | null;
+  waitingRoomStatus: 'waiting' | 'admitted' | 'denied' | 'cancelled' | null;
   onCancel: () => void;
   onAdmitted: () => void;
+  onDenied: () => void;
+  onCancelled: () => void;
 }) {
   useEffect(() => {
     if (waitingRoomStatus !== 'waiting') {
@@ -1159,8 +1202,16 @@ function WaitingRoomScreen({
         if (entry.participant_name !== participantName) {
           return;
         }
+
         if (entry.status === 'admitted') {
           onAdmitted();
+          es.close();
+        } else if (entry.status === 'denied') {
+          onDenied();
+          es.close();
+        } else if (entry.status === 'cancelled') {
+          onCancelled();
+          es.close();
         }
       } catch {
         // Ignore malformed messages.
@@ -1170,7 +1221,7 @@ function WaitingRoomScreen({
     return () => {
       es.close();
     };
-  }, [consultationId, participantName, waitingRoomStatus, onAdmitted]);
+  }, [consultationId, participantName, waitingRoomStatus, onAdmitted, onDenied, onCancelled]);
 
   return (
     <div className="call-shell">
@@ -1273,7 +1324,7 @@ function WaitingRoomPanel({
             return [...current, entry];
           });
         } else {
-          // admitted or denied — remove from the list.
+          // admitted, denied, or cancelled — remove from the list.
           setEntries((current) =>
             current.filter((e) => e.participant_name !== entry.participant_name),
           );
@@ -2194,6 +2245,7 @@ function App() {
     busy,
     waitingForAdmission,
     waitingRoomStatus,
+    setWaitingRoomStatus,
     locked,
     participants,
     setCallStage,
@@ -2212,6 +2264,7 @@ function App() {
     handleRoomTerminatedRemotely,
     returnToJoinForm,
     cancelWaiting,
+    resetWaitingRoomUiState,
     lockConsultation,
     unlockConsultation,
     listParticipants,
@@ -2227,6 +2280,10 @@ function App() {
     void beginJoinSession();
   }, [beginJoinSession]);
 
+  const handleWaitingRoomDenied = useCallback(() => {
+    setWaitingRoomStatus('denied');
+  }, [setWaitingRoomStatus]);
+
   if (joinState !== null && waitingForAdmission) {
     return (
       <WaitingRoomScreen
@@ -2236,6 +2293,8 @@ function App() {
         waitingRoomStatus={waitingRoomStatus}
         onCancel={cancelWaiting}
         onAdmitted={handleWaitingRoomAdmitted}
+        onDenied={handleWaitingRoomDenied}
+        onCancelled={resetWaitingRoomUiState}
       />
     );
   }
