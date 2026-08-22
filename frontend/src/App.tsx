@@ -1192,9 +1192,25 @@ function WaitingRoomScreen({
       return;
     }
 
+    const eventParams = new URLSearchParams({
+      participant_name: participantName,
+      role,
+    });
     const es = new EventSource(
-      `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/events`,
+      `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/events?${eventParams}`,
     );
+    let consecutiveErrors = 0;
+
+    es.onopen = () => {
+      consecutiveErrors = 0;
+    };
+
+    es.onerror = () => {
+      consecutiveErrors += 1;
+      if (es.readyState === EventSource.CLOSED || consecutiveErrors >= 3) {
+        es.close();
+      }
+    };
 
     es.onmessage = (event) => {
       try {
@@ -1221,7 +1237,7 @@ function WaitingRoomScreen({
     return () => {
       es.close();
     };
-  }, [consultationId, participantName, waitingRoomStatus, onAdmitted, onDenied, onCancelled]);
+  }, [consultationId, participantName, role, waitingRoomStatus, onAdmitted, onDenied, onCancelled]);
 
   return (
     <div className="call-shell">
@@ -1302,9 +1318,25 @@ function WaitingRoomPanel({
     void fetchInitial();
 
     // SSE stream for real-time updates.
+    const eventParams = new URLSearchParams({
+      participant_name: doctorName,
+      role: 'doctor',
+    });
     const es = new EventSource(
-      `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/events`,
+      `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/events?${eventParams}`,
     );
+    let consecutiveErrors = 0;
+
+    es.onopen = () => {
+      consecutiveErrors = 0;
+    };
+
+    es.onerror = () => {
+      consecutiveErrors += 1;
+      if (es.readyState === EventSource.CLOSED || consecutiveErrors >= 3) {
+        es.close();
+      }
+    };
 
     es.onmessage = (event) => {
       try {
@@ -1338,7 +1370,7 @@ function WaitingRoomPanel({
       cancelled = true;
       es.close();
     };
-  }, [consultationId]);
+  }, [consultationId, doctorName]);
 
   const handleAction = useCallback(
     async (participantName: string, action: 'admit' | 'deny') => {

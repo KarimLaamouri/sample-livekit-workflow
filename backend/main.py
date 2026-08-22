@@ -24,6 +24,7 @@ from auth import (
     ActorContext,
     get_authorized_doctor,
     get_authorized_participant,
+    get_authorized_participant_query,
 )
 from database import AsyncSessionLocal, get_db
 from models import Consultation, WaitingRoomEntry as WaitingRoomEntryModel, get_e2ee_key
@@ -1096,7 +1097,10 @@ async def list_waiting_room(
 
 
 @app.get("/api/consultations/{consultation_id}/waiting-room/events")
-async def waiting_room_events(consultation_id: str) -> StreamingResponse:
+async def waiting_room_events(
+    consultation_id: str,
+    actor: ActorContext = Depends(get_authorized_participant_query),
+) -> StreamingResponse:
     """SSE stream of waiting-room state changes for a consultation."""
     queue = waiting_room_hub.subscribe(consultation_id)
 

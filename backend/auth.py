@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Literal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,3 +83,13 @@ async def get_authorized_participant(
     db: AsyncSession = Depends(get_db),
 ) -> ActorContext:
     return await authorize_participant(consultation_id, body, db)
+
+
+async def get_authorized_participant_query(
+    consultation_id: str,
+    participant_name: str = Query(...),
+    role: Role = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> ActorContext:
+    assertion = ActorAssertion(participant_name=participant_name, role=role)
+    return await authorize_participant(consultation_id, assertion, db)
