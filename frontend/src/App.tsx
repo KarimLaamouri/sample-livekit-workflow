@@ -247,7 +247,6 @@ type CallViewProps = {
   consultationExpiresAt: string | null;
   busy: boolean;
   consultationId: string;
-  doctorName: string;
   locked: boolean;
   participants: ParticipantInfo[];
   onRequestJoinToken: (request?: Pick<JoinState, 'consultationId' | 'participantName' | 'role'>) => Promise<void>;
@@ -1275,10 +1274,10 @@ function WaitingRoomScreen({
 
 function WaitingRoomPanel({
   consultationId,
-  doctorName,
+  participantName,
 }: {
   consultationId: string;
-  doctorName: string;
+  participantName: string;
 }) {
   const [entries, setEntries] = useState<WaitingRoomEntryData[]>([]);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
@@ -1295,7 +1294,7 @@ function WaitingRoomPanel({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              participant_name: doctorName,
+              participant_name: participantName,
               role: 'doctor',
             }),
           },
@@ -1319,7 +1318,7 @@ function WaitingRoomPanel({
 
     // SSE stream for real-time updates.
     const eventParams = new URLSearchParams({
-      participant_name: doctorName,
+      participant_name: participantName,
       role: 'doctor',
     });
     const es = new EventSource(
@@ -1370,7 +1369,7 @@ function WaitingRoomPanel({
       cancelled = true;
       es.close();
     };
-  }, [consultationId, doctorName]);
+  }, [consultationId, participantName]);
 
   const handleAction = useCallback(
     async (participantName: string, action: 'admit' | 'deny') => {
@@ -1383,7 +1382,7 @@ function WaitingRoomPanel({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              participant_name: doctorName,
+              participant_name: participantName,
               role: 'doctor',
             }),
           },
@@ -1400,7 +1399,7 @@ function WaitingRoomPanel({
         setActionBusy(null);
       }
     },
-    [consultationId, doctorName],
+    [consultationId, participantName],
   );
 
   if (entries.length === 0) {
@@ -1796,7 +1795,6 @@ function CallView({
   consultationExpiresAt,
   busy,
   consultationId,
-  doctorName,
   locked,
   participants,
   onRequestJoinToken,
@@ -2000,6 +1998,7 @@ function CallView({
       await room.setE2EEEnabled(true);
       await room.connect(LIVEKIT_URL, token);
       if (deviceChoices) {
+        await room.localParticipant.setName(deviceChoices.username);
         await room.localParticipant.setCameraEnabled(deviceChoices.videoEnabled, { deviceId: deviceChoices.videoDeviceId });
         await room.localParticipant.setMicrophoneEnabled(deviceChoices.audioEnabled, { deviceId: deviceChoices.audioDeviceId });
       }
@@ -2073,10 +2072,10 @@ function CallView({
     setStage('connecting');
     void requestFreshToken({
       consultationId: joinState.consultationId,
-      participantName: choices.username,
+      participantName: joinState.participantName,
       role: joinState.role,
     });
-  }, [joinState.consultationId, joinState.role, requestFreshToken]);
+  }, [joinState.consultationId, joinState.participantName, joinState.role, requestFreshToken]);
 
   const handlePreJoinError = useCallback((error: Error) => {
     setConnectionNotice(createErrorNotice(error, 'Opening the device check'));
@@ -2185,7 +2184,10 @@ function CallView({
       </div>
       {joinState.role === 'doctor' && (
         <>
-          <WaitingRoomPanel consultationId={consultationId} doctorName={doctorName} />
+          <WaitingRoomPanel
+            consultationId={consultationId}
+            participantName={joinState.participantName}
+          />
           <ParticipantsPanel
             participants={participants}
             onRemoveParticipant={onRemoveParticipant}
@@ -2338,7 +2340,6 @@ function App() {
         consultationExpiresAt={consultation?.expires_at ?? null}
         busy={busy}
         consultationId={consultationId}
-        doctorName={doctorName}
         locked={locked}
         participants={participants}
         onRequestJoinToken={joinConsultation}
