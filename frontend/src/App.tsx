@@ -64,7 +64,7 @@ type ChatMessageResponse = {
   sender_role: string;
   body: string;
   sent_at: string;
-  client_message_id: string | null; // Client-generated UUID for exact deduplication
+  client_message_id: string; // Client-generated UUID for exact deduplication
 };
 
 type ParticipantInfo = {
@@ -1555,22 +1555,10 @@ function CustomChat({
       // Merge new messages into historyMessages with client_message_id-aware deduplication
       setHistoryMessages((prev) => {
         // Build sets for exact deduplication using client_message_id
-        const existingClientIds = new Set(
-          prev.map((msg) => msg.client_message_id).filter((id): id is string => id !== null)
-        );
-        const existingFallbackKeys = new Set(
-          prev
-            .filter((msg) => msg.client_message_id === null)
-            .map((msg) => `${msg.sender_name}|${msg.sent_at}`)
-        );
+        const existingClientIds = new Set(prev.map((msg) => msg.client_message_id));
 
         const newMessages = messages.filter((msg) => {
-          // If message has client_message_id, check exact match
-          if (msg.client_message_id !== null) {
-            return !existingClientIds.has(msg.client_message_id);
-          }
-          // Otherwise, use fallback heuristic (sender_name + sent_at)
-          return !existingFallbackKeys.has(`${msg.sender_name}|${msg.sent_at}`);
+          return !existingClientIds.has(msg.client_message_id);
         });
 
         // Merge and sort by sent_at
@@ -1668,59 +1656,21 @@ function CustomChat({
     };
 
     // Build a set of client_message_ids from historical messages for exact deduplication
-    const historyClientIds = new Set(
-      historyMessages
-        .map((m) => m.client_message_id)
-        .filter((id): id is string => id !== null)
+    const historyClientIds = new Set(historyMessages.map((m) => m.client_message_id));
+
+    // Keep live messages without an ID for compatibility with an older client during rollout.
+    const filteredLiveMessages = chat.chatMessages.filter(
+      (liveMsg) =>
+        !(
+          liveMsg.attributes?.client_message_id &&
+          historyClientIds.has(liveMsg.attributes.client_message_id)
+        )
     );
-
-    // Helper function for fallback heuristic deduplication (name+body+15-second window)
-    // Used for messages without client_message_id (historical data before this feature)
-    const isDuplicateByHeuristic = (
-      liveMessage: { from: string; message: string; timestamp: number },
-      historyMessage: { sender_name: string; body: string; sent_at: string }
-    ) => {
-      const timeDiff = Math.abs(
-        liveMessage.timestamp - new Date(historyMessage.sent_at).getTime()
-      );
-      return (
-        liveMessage.from === historyMessage.sender_name &&
-        liveMessage.message === historyMessage.body &&
-        timeDiff < 15000 // 15-second window
-      );
-    };
-
-    // Filter live messages: exclude if client_message_id matches history, or if heuristic matches
-    const filteredLiveMessages = chat.chatMessages.filter((liveMsg) => {
-      const liveClientId = liveMsg.attributes?.client_message_id;
-
-      // Exact deduplication: if we have a client_message_id and it's in history, skip this live message
-      if (liveClientId && historyClientIds.has(liveClientId)) {
-        return false;
-      }
-
-      // Fallback heuristic: for messages without client_message_id, use name+body+time-window
-      if (!liveClientId) {
-        return !historyMessages.some((historyMsg) =>
-          isDuplicateByHeuristic(
-            {
-              from: getParticipantNameFromIdentity(liveMsg.from?.identity),
-              message: liveMsg.message,
-              timestamp: liveMsg.timestamp,
-            },
-            historyMsg
-          )
-        );
-      }
-
-      // Keep live messages with client_message_id that aren't in history
-      return true;
-    });
 
     // Combine and sort by timestamp
     return [
       ...historyMessages.map((m) => ({
-        id: `history-${m.sent_at}-${m.sender_name}`,
+        id: `history-${m.client_message_id}`,
         from: m.sender_name,
         message: m.body,
         timestamp: new Date(m.sent_at).getTime(),

@@ -359,22 +359,8 @@ async def create_chat_message(
     sender_name: str,
     sender_role: str,
     body: str,
-    client_message_id: str | None = None,
+    client_message_id: str,
 ) -> ChatMessage:
-    if client_message_id is None:
-        # No idempotency key supplied (e.g. legacy caller) — plain insert,
-        # unchanged from before this task.
-        message = ChatMessage(
-            consultation_id=consultation_id,
-            sender_name=sender_name,
-            sender_role=sender_role,
-            body=body,
-            client_message_id=None,
-        )
-        session.add(message)
-        await session.flush()
-        return message
-
     # Idempotent path: ON CONFLICT DO NOTHING against the partial unique
     # index on (consultation_id, client_message_id) from migration 0009.
     # This is atomic at the DB level — correct even if two requests with

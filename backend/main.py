@@ -236,7 +236,7 @@ class ModerationActionResponse(BaseModel):
 
 class SendChatMessagePayload(ActorAssertion):
     body: str = Field(min_length=1, max_length=3000)
-    client_message_id: str | None = None  # Client-generated UUID for exact deduplication
+    client_message_id: str = Field(min_length=36, max_length=36)
 
 
 class ChatMessageResponse(BaseModel):
@@ -244,7 +244,7 @@ class ChatMessageResponse(BaseModel):
     sender_role: str
     body: str
     sent_at: str
-    client_message_id: str | None = None  # Client-generated UUID for exact deduplication
+    client_message_id: str
 
 
 class ParticipantInfo(BaseModel):

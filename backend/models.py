@@ -202,8 +202,7 @@ class ChatMessage(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     # Client-generated UUID for exact deduplication between LiveKit and persisted messages
-    # Nullable for backward compatibility with historical messages
-    client_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    client_message_id: Mapped[str] = mapped_column(String(36), nullable=False)
 
     __table_args__ = (
         CheckConstraint("sender_role IN ('doctor', 'patient', 'observer')", name="ck_chat_message_role"),
