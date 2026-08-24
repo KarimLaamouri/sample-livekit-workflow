@@ -1661,6 +1661,15 @@ function CustomChat({
 
   // Merge historical and live messages with exact deduplication using client_message_id
   const combined = useMemo(() => {
+    const getParticipantNameFromIdentity = (identity?: string) => {
+      if (!identity) return 'Unknown';
+
+      const parts = identity.split(':');
+      if (parts.length >= 3) return parts.slice(1, -1).join(':');
+      if (parts.length === 2) return parts[1];
+      return identity;
+    };
+
     // Build a set of client_message_ids from historical messages for exact deduplication
     const historyClientIds = new Set(
       historyMessages
@@ -1698,7 +1707,7 @@ function CustomChat({
         return !historyMessages.some((historyMsg) =>
           isDuplicateByHeuristic(
             {
-              from: liveMsg.from?.name ?? liveMsg.from?.identity ?? 'Unknown',
+              from: getParticipantNameFromIdentity(liveMsg.from?.identity),
               message: liveMsg.message,
               timestamp: liveMsg.timestamp,
             },
@@ -1722,7 +1731,7 @@ function CustomChat({
       })),
       ...filteredLiveMessages.map((m) => ({
         id: m.id,
-        from: m.from?.name ?? m.from?.identity ?? 'Unknown',
+        from: getParticipantNameFromIdentity(m.from?.identity),
         message: m.message,
         timestamp: m.timestamp,
         isLocal: m.from?.isLocal ?? false,
