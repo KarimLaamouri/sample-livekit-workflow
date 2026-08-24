@@ -195,7 +195,6 @@ class ChatMessage(Base):
     consultation_id: Mapped[str] = mapped_column(
         ForeignKey("consultations.consultation_id", ondelete="CASCADE"), nullable=False
     )
-    sender_identity: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     sender_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     sender_role: Mapped[str] = mapped_column(String(16), nullable=False)
     body: Mapped[str] = mapped_column(EncryptedString, nullable=False)

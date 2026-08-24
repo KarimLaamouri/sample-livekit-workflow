@@ -356,7 +356,6 @@ async def create_chat_message(
     session: AsyncSession,
     *,
     consultation_id: str,
-    sender_identity: str,
     sender_name: str,
     sender_role: str,
     body: str,
@@ -367,7 +366,6 @@ async def create_chat_message(
         # unchanged from before this task.
         message = ChatMessage(
             consultation_id=consultation_id,
-            sender_identity=sender_identity,
             sender_name=sender_name,
             sender_role=sender_role,
             body=body,
@@ -393,7 +391,6 @@ async def create_chat_message(
         pg_insert(ChatMessage)
         .values(
             consultation_id=consultation_id,
-            sender_identity=sender_identity,
             sender_name=sender_name,
             sender_role=sender_role,
             body=body,

@@ -60,7 +60,6 @@ type WaitingRoomEntryData = {
 };
 
 type ChatMessageResponse = {
-  sender_identity: string;
   sender_name: string;
   sender_role: string;
   body: string;
@@ -265,7 +264,6 @@ type CallViewProps = {
     consultationId: string,
     body: string,
     clientMessageId: string,
-    senderIdentity: string,
   ) => Promise<void>;
 };
 
@@ -313,7 +311,6 @@ type ConsultationController = {
     id: string,
     body: string,
     clientMessageId: string,
-    senderIdentity: string,
   ) => Promise<void>;
 };
 
@@ -773,7 +770,7 @@ function useConsultation(): ConsultationController {
   }, [joinState, requestJson]);
 
   const sendChatMessage = useCallback(
-    async (id: string, body: string, clientMessageId: string, senderIdentity: string) => {
+    async (id: string, body: string, clientMessageId: string) => {
       const currentJoinState = joinState;
       if (!currentJoinState || !id.trim()) {
         return;
@@ -789,7 +786,6 @@ function useConsultation(): ConsultationController {
               role: currentJoinState.role,
               body: body,
               client_message_id: clientMessageId,
-              sender_identity: senderIdentity,
             }),
           },
         );
@@ -1517,18 +1513,19 @@ function CustomVideoGrid() {
 
 function CustomChat({
   consultationId,
+  joinState,
   onLoadChatHistory,
   onSendChatMessage,
   isOpen,
   onUnreadChange,
 }: {
   consultationId: string;
+  joinState: JoinState;
   onLoadChatHistory: (consultationId: string) => Promise<ChatMessageResponse[]>;
   onSendChatMessage: (
     consultationId: string,
     body: string,
     clientMessageId: string,
-    senderIdentity: string,
   ) => Promise<void>;
   isOpen: boolean;
   onUnreadChange: (count: number) => void;
@@ -1564,7 +1561,7 @@ function CustomChat({
         const existingFallbackKeys = new Set(
           prev
             .filter((msg) => msg.client_message_id === null)
-            .map((msg) => `${msg.sender_identity}|${msg.sent_at}`)
+            .map((msg) => `${msg.sender_name}|${msg.sent_at}`)
         );
 
         const newMessages = messages.filter((msg) => {
@@ -1572,8 +1569,8 @@ function CustomChat({
           if (msg.client_message_id !== null) {
             return !existingClientIds.has(msg.client_message_id);
           }
-          // Otherwise, use fallback heuristic (sender_identity + sent_at)
-          return !existingFallbackKeys.has(`${msg.sender_identity}|${msg.sent_at}`);
+          // Otherwise, use fallback heuristic (sender_name + sent_at)
+          return !existingFallbackKeys.has(`${msg.sender_name}|${msg.sent_at}`);
         });
 
         // Merge and sort by sent_at
@@ -1643,7 +1640,7 @@ function CustomChat({
       // Persist to backend with the same client_message_id
       // If backend call fails, the LiveKit message still goes through (don't vanish from sender's UI)
       try {
-        await onSendChatMessage(consultationId, body, clientMessageId, room.localParticipant.identity);
+        await onSendChatMessage(consultationId, body, clientMessageId);
       } catch (backendError) {
         console.error('Failed to persist chat message to backend (LiveKit send succeeded):', backendError);
         // Don't clear draft on backend failure so user can retry, but LiveKit message is already sent
@@ -1723,21 +1720,27 @@ function CustomChat({
     // Combine and sort by timestamp
     return [
       ...historyMessages.map((m) => ({
-        id: `history-${m.sent_at}-${m.sender_identity}`,
+        id: `history-${m.sent_at}-${m.sender_name}`,
         from: m.sender_name,
         message: m.body,
         timestamp: new Date(m.sent_at).getTime(),
-        isLocal: m.sender_identity === room.localParticipant.identity,
+        isLocal: m.sender_name === joinState.participantName && m.sender_role === joinState.role,
       })),
       ...filteredLiveMessages.map((m) => ({
         id: m.id,
         from: getParticipantNameFromIdentity(m.from?.identity),
         message: m.message,
         timestamp: m.timestamp,
-        isLocal: m.from?.isLocal ?? false,
+        isLocal: m.from?.identity === room.localParticipant.identity,
       })),
     ].sort((a, b) => a.timestamp - b.timestamp);
-  }, [historyMessages, chat.chatMessages, room.localParticipant.identity]);
+  }, [
+    historyMessages,
+    chat.chatMessages,
+    joinState.participantName,
+    joinState.role,
+    room.localParticipant.identity,
+  ]);
 
   // Track unread messages while the panel is closed; reset once it's opened.
   useEffect(() => {
@@ -2259,6 +2262,7 @@ function CallView({
             <div className={`custom-call-chat${chatOpen ? '' : ' custom-call-chat--collapsed'}`}>
               <CustomChat
                 consultationId={consultationId}
+                joinState={joinState}
                 onLoadChatHistory={onLoadChatHistory}
                 onSendChatMessage={onSendChatMessage}
                 isOpen={chatOpen}

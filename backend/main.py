@@ -237,15 +237,9 @@ class ModerationActionResponse(BaseModel):
 class SendChatMessagePayload(ActorAssertion):
     body: str = Field(min_length=1, max_length=3000)
     client_message_id: str | None = None  # Client-generated UUID for exact deduplication
-    sender_identity: str | None = None  # Real LiveKit participant identity (role:name:suffix),
-                                          # used only for local-message rendering on the client —
-                                          # NOT an authorization signal. Falls back to
-                                          # participant_name below if omitted (e.g. older frontend
-                                          # build), matching previous behavior.
 
 
 class ChatMessageResponse(BaseModel):
-    sender_identity: str
     sender_name: str
     sender_role: str
     body: str
@@ -1596,7 +1590,6 @@ async def send_chat_message(
     message = await crud.create_chat_message(
         session,
         consultation_id=consultation_id,
-        sender_identity=payload.sender_identity or actor.participant_name,
         sender_name=actor.participant_name,
         sender_role=actor.role,
         body=payload.body,
@@ -1604,7 +1597,6 @@ async def send_chat_message(
     )
 
     return ChatMessageResponse(
-        sender_identity=message.sender_identity,
         sender_name=message.sender_name,
         sender_role=message.sender_role,
         body=message.body,
@@ -1624,7 +1616,6 @@ async def list_chat_messages(
 
     return [
         ChatMessageResponse(
-            sender_identity=msg.sender_identity,
             sender_name=msg.sender_name,
             sender_role=msg.sender_role,
             body=msg.body,
