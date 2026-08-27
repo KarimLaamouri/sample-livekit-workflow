@@ -1368,12 +1368,12 @@ function WaitingRoomPanel({
   }, [consultationId, participantName]);
 
   const handleAction = useCallback(
-    async (participantName: string, action: 'admit' | 'deny') => {
-      setActionBusy(participantName);
+    async (targetParticipantName: string, action: 'admit' | 'deny') => {
+      setActionBusy(targetParticipantName);
 
       try {
         const response = await fetch(
-          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/${encodeURIComponent(participantName)}/${action}`,
+          `${API_URL}/api/consultations/${encodeURIComponent(consultationId)}/waiting-room/${encodeURIComponent(targetParticipantName)}/${action}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1386,7 +1386,7 @@ function WaitingRoomPanel({
 
         if (response.ok) {
           setEntries((current) =>
-            current.filter((e) => e.participant_name !== participantName),
+            current.filter((e) => e.participant_name !== targetParticipantName),
           );
         }
       } catch {
