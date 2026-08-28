@@ -10,8 +10,9 @@ A secure, healthcare-compliant video conferencing workflow built with **LiveKit*
 * **WebRTC Infrastructure:** LiveKit Server
 * **Encryption:**
   * Media (audio/video) end-to-end encryption via LiveKit's native frame-level E2EE.
-  * Chat message content encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), same as other PII/PHI fields.
-  * PII/PHI fields (participant names, audit log details, chat sender identity) encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), transparent to the rest of the backend via SQLAlchemy `TypeDecorator`s.
+  * Chat message content encrypted **in transit** via a dedicated `e2ee.py` module, in addition to being encrypted at rest in PostgreSQL like other PII/PHI fields.
+  * PII/PHI fields (participant names, audit log details, chat sender identity) encrypted **at rest** in PostgreSQL at the application layer (AES-256-GCM), transparent to the rest of the backend via SQLAlchemy `TypeDecorator`s (`encryption.py`).
+* **Authorization:** Centralized in `auth.py`, which is the single place actor assertions (who's making a request, and what they're allowed to do) are resolved and checked, rather than each endpoint reimplementing its own role/identity logic.
 * **Security Focus:** Short-lived JWTs, strict room isolation, comprehensive audit logging, field-level encryption for compliance tracking, and a least-privilege database role for the running app.
 
 ---
@@ -37,10 +38,12 @@ sample-livekit-workflow/
 │   │   ├── versions/     # One file per schema change
 │   │   └── env.py
 │   ├── alembic.ini
+│   ├── auth.py           # Centralized authorization (actor assertion / access control)
 │   ├── database.py       # Async engine, session factory, get_db dependency
 │   ├── models.py         # SQLAlchemy ORM models (source of truth for schema)
 │   ├── crud.py           # DB access / repository layer
-│   ├── encryption.py     # AES-256-GCM field encryption + HMAC blind-index utilities
+│   ├── e2ee.py           # End-to-end encryption for messages in transit
+│   ├── encryption.py     # AES-256-GCM field encryption + HMAC blind-index utilities (at rest)
 │   ├── main.py            # FastAPI app, token generation, webhook handling
 │   └── requirements.txt
 ├── frontend/              # React/Vite application UI
@@ -225,6 +228,39 @@ This assumes dependencies have already been installed at least once (`pip instal
 
 ---
 
+## 🎥 Video Consultation Features
+
+Beyond the baseline "join a room and talk" flow, the teleconsultation module implements the following consultation-management features:
+
+### Waiting Room / Admission Control
+
+* Patients and observers who join before the doctor is present are held in a waiting room (`waiting_room_entries` table) rather than entering the LiveKit room directly.
+* If the doctor is already in the room and it isn't locked, non-doctor participants are auto-admitted; otherwise their request queues with status `waiting` until the doctor takes action.
+* The doctor sees a live waiting-room panel listing each pending participant's name and role, with **Admit** / **Deny** actions and a badge indicating how many requests are pending.
+* Admission is enforced server-side at the `/token` endpoint — a denied or not-yet-admitted participant cannot obtain a LiveKit join token, not just be hidden from the UI.
+
+### Host Moderation Controls
+
+Doctor-only, in-call moderation actions, kept separate from ending the whole consultation:
+
+| Action | What it does |
+|---|---|
+| **Lock / Unlock room** | While locked, no new non-doctor participant can obtain a join token; participants already connected are unaffected. |
+| **Live participants panel** | Real-time list of everyone currently in the LiveKit room, read directly from the LiveKit server API. |
+| **Mute participant** | Server-side mute of a specific participant's published audio/video tracks. |
+| **Remove participant** | Disconnects a specific participant from the room without ending the consultation for anyone else. |
+
+Every moderation action is written to the audit trail (`consultation.locked`, `consultation.unlocked`, `participant.muted_by_host`, `participant.removed_by_host`).
+
+### Persistent Chat with Full History
+
+* In-call chat messages are persisted to the `chat_messages` table in addition to being delivered live over LiveKit's data channel.
+* Participants who join after messages were already sent, or who reconnect mid-consultation, see the full chat history rather than only messages sent while they happened to be connected — closing a gap common to WebRTC chat implementations that treat chat as purely ephemeral.
+* The chat UI merges persisted history with live incoming messages, de-duplicating by sender/body/timestamp so a participant doesn't see their own sent messages appear twice once history is refetched.
+* The chat panel is collapsed by default and toggled open on demand; while collapsed, an unread-message badge tracks how many new messages have arrived since it was last opened.
+
+---
+
 ## 🛡️ Security & Healthcare Compliance Features
 
 This workflow is designed with healthcare and enterprise security requirements in mind:
@@ -234,7 +270,7 @@ This workflow is designed with healthcare and enterprise security requirements i
 * **Short-Lived Tokens:** JWTs are minted with a low Time-To-Live (TTL) to minimize the attack surface in case of token interception.
 * **Media & Chat Encryption:** Audio/video is protected by LiveKit's native end-to-end frame encryption; chat message content is encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), same as other PII/PHI fields.
 * **Field-Level Encryption at Rest:** Participant/doctor/patient names, waiting room entries, audit event details, and chat sender identity are encrypted at the application layer (AES-256-GCM) before being written to PostgreSQL, protecting against database-level exposure (backup theft, unauthorized DB access, SQL injection dumps) even though the fields remain queryable/joinable where the application needs them to be.
-* **Comprehensive, Durable, Tamper-Evident Audit Logging:** Every critical event (room creation, token issuance, waiting-room admission/denial, room termination, LiveKit webhook events) is persisted to the `audit_events` table, chained via SHA-256 row hashes (`row_hash`/`prev_row_hash`) so any historical edit is detectable on verification — surviving backend restarts, unlike the earlier in-memory implementation.
+* **Comprehensive, Durable, Tamper-Evident Audit Logging:** Every critical event (room creation, token issuance, waiting-room admission/denial, host moderation actions, room termination, LiveKit webhook events) is persisted to the `audit_events` table, chained via SHA-256 row hashes (`row_hash`/`prev_row_hash`) so any historical edit is detectable on verification — surviving backend restarts, unlike the earlier in-memory implementation.
 * **Least-Privilege Database Role:** The app connects at runtime as `tachafy_app`, a non-superuser role with no `UPDATE`/`DELETE` rights on `audit_events` at all, enforced by PostgreSQL itself — see [Database Roles & Least-Privilege Access](#-database-roles--least-privilege-access).
 * **Transactional Integrity:** Consultation creation is wrapped in a database transaction; if LiveKit room creation fails, the consultation record is rolled back rather than left in an inconsistent state, while the failure itself is still recorded in the audit trail.
 
