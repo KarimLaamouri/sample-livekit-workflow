@@ -1646,13 +1646,23 @@ function CustomChat({
 
   // Merge historical and live messages with exact deduplication using client_message_id
   const combined = useMemo(() => {
-    const getParticipantNameFromIdentity = (identity?: string) => {
-      if (!identity) return 'Unknown';
+    const parseParticipantIdentity = (identity?: string) => {
+      if (!identity) {
+        return { name: undefined, role: undefined };
+      }
 
       const parts = identity.split(':');
-      if (parts.length >= 3) return parts.slice(1, -1).join(':');
-      if (parts.length === 2) return parts[1];
-      return identity;
+      if (parts.length >= 3) {
+        return { role: parts[0], name: parts.slice(1, -1).join(':') };
+      }
+      if (parts.length === 2) {
+        return { role: parts[0], name: parts[1] };
+      }
+      return { role: undefined, name: identity };
+    };
+
+    const getParticipantNameFromIdentity = (identity?: string) => {
+      return parseParticipantIdentity(identity).name ?? 'Unknown';
     };
 
     // Build a set of client_message_ids from historical messages for exact deduplication
@@ -1676,21 +1686,21 @@ function CustomChat({
         timestamp: new Date(m.sent_at).getTime(),
         isLocal: m.sender_name === joinState.participantName && m.sender_role === joinState.role,
       })),
-      ...filteredLiveMessages.map((m) => ({
-        id: m.id,
-        from: getParticipantNameFromIdentity(m.from?.identity),
-        message: m.message,
-        timestamp: m.timestamp,
-        isLocal: m.from?.identity === room.localParticipant.identity,
-      })),
+      ...filteredLiveMessages.map((m) => {
+        const parsedLiveParticipant = parseParticipantIdentity(m.from?.identity);
+
+        return {
+          id: m.id,
+          from: getParticipantNameFromIdentity(m.from?.identity),
+          message: m.message,
+          timestamp: m.timestamp,
+          isLocal:
+            parsedLiveParticipant.name === joinState.participantName &&
+            parsedLiveParticipant.role === joinState.role,
+        };
+      }),
     ].sort((a, b) => a.timestamp - b.timestamp);
-  }, [
-    historyMessages,
-    chat.chatMessages,
-    joinState.participantName,
-    joinState.role,
-    room.localParticipant.identity,
-  ]);
+  }, [historyMessages, chat.chatMessages, joinState.participantName, joinState.role]);
 
   // Track unread messages while the panel is closed; reset once it's opened.
   useEffect(() => {
