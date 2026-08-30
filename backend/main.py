@@ -13,6 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from google.protobuf.json_format import MessageToDict
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from google.protobuf.message import Message
 from livekit import api
 from pydantic import BaseModel, Field
@@ -130,6 +132,8 @@ waiting_room_hub = WaitingRoomHub()
 
 
 app = FastAPI(title="Tachafy Teleconsultation Demo", lifespan=lifespan)
+limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+limiter.init_app(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -430,10 +434,40 @@ def _build_participant_audit_data_from_participant(participant: Any) -> dict[str
     )
 
 
+async def _log_webhook_failure(
+    session: AsyncSession, request: Request, reason: str
+) -> None:
+    source_ip = None
+    try:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            source_ip = forwarded_for.split(",", 1)[0].strip() or None
+        if source_ip is None and request.client is not None:
+            source_ip = request.client.host
+    except Exception:
+        source_ip = None
+
+    try:
+        await crud.create_audit_event(
+            session,
+            "webhook.verification_failed",
+            source_ip=source_ip,
+            reason=reason,
+        )
+        await session.commit()
+    except Exception:
+        logger.exception(
+            "Failed to log webhook verification failure: reason=%s source_ip=%s",
+            reason,
+            source_ip,
+        )
+
+
 async def _verify_and_parse_webhook(
     session: AsyncSession, request: Request, authorization: str | None
 ) -> Any | None:
     if not authorization:
+        await _log_webhook_failure(session, request, "missing_authorization_header")
         raise HTTPException(status_code=401, detail="Missing Authorization Header")
 
     api_key, api_secret = require_livekit_credentials()
@@ -446,6 +480,7 @@ async def _verify_and_parse_webhook(
     try:
         event = webhook_receiver.receive(body_str, authorization)
     except Exception:
+        await _log_webhook_failure(session, request, "invalid_signature")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     event_id = getattr(event, "id", None)
@@ -1654,6 +1689,7 @@ async def get_consultation_history(
     )
 
 
+@limiter.limit("30/minute")
 @app.post("/api/webhooks")
 async def livekit_webhook(
     request: Request,

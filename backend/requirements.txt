@@ -9,3 +9,4 @@ sqlalchemy>=2.0.30
 asyncpg>=0.29
 alembic>=1.13
 cryptography>=42.0.0
+slowapi
