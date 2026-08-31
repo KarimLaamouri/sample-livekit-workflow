@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -9,9 +10,10 @@ from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request, Security
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.protobuf.json_format import MessageToDict
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -609,6 +611,32 @@ def require_livekit_credentials() -> tuple[str, str]:
     return api_key, api_secret
 
 
+s2s_bearer_scheme = HTTPBearer()
+
+
+def verify_s2s_token(
+    credentials: HTTPAuthorizationCredentials = Security(s2s_bearer_scheme),
+) -> str:
+    """Authentifie le backend Tachafy comme appelant serveur-à-serveur.
+
+    Nom de variable d'env volontairement distinct de
+    VIDEO_CONSULTATION_API_TOKEN (l'ancien token du vendor Jitsi côté
+    Tachafy) — les deux coexistent pendant la transition, ne pas les
+    confondre ni les fusionner.
+
+    hmac.compare_digest plutôt que != : comparaison en temps constant,
+    élimine l'attaque temporelle sur la comparaison du token.
+    """
+    expected = os.getenv("LIVEKIT_S2S_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=500, detail="S2S token not configured")
+
+    if not hmac.compare_digest(credentials.credentials, expected):
+        raise HTTPException(status_code=401, detail={"code": "INVALID_S2S_TOKEN"})
+
+    return credentials.credentials
+
+
 def resolve_livekit_api_url() -> str:
     configured = (
         os.getenv("LIVEKIT_API_URL")
@@ -931,6 +959,7 @@ async def health() -> dict[str, Any]:
 async def create_consultation(
     payload: CreateConsultationRequest,
     session: AsyncSession = Depends(get_db),
+    _s2s: str = Depends(verify_s2s_token),
 ) -> CreateConsultationResponse:
     require_livekit_credentials()
 
