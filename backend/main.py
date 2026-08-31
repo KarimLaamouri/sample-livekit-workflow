@@ -13,7 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from google.protobuf.json_format import MessageToDict
-from slowapi import Limiter
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from google.protobuf.message import Message
 from livekit import api
@@ -133,7 +134,8 @@ waiting_room_hub = WaitingRoomHub()
 
 app = FastAPI(title="Tachafy Teleconsultation Demo", lifespan=lifespan)
 limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
-limiter.init_app(app)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1689,8 +1691,8 @@ async def get_consultation_history(
     )
 
 
-@limiter.limit("30/minute")
 @app.post("/api/webhooks")
+@limiter.limit("30/minute")
 async def livekit_webhook(
     request: Request,
     authorization: str = Header(None),
