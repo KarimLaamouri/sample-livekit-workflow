@@ -13,7 +13,7 @@ A secure, healthcare-compliant video conferencing workflow built with **LiveKit*
   * Chat message content encrypted **in transit** via a dedicated `e2ee.py` module, in addition to being encrypted at rest in PostgreSQL like other PII/PHI fields.
   * PII/PHI fields (participant names, audit log details, chat sender identity) encrypted **at rest** in PostgreSQL at the application layer (AES-256-GCM), transparent to the rest of the backend via SQLAlchemy `TypeDecorator`s (`encryption.py`).
 * **Authorization:** Centralized in `auth.py`, which is the single place actor assertions (who's making a request, and what they're allowed to do) are resolved and checked, rather than each endpoint reimplementing its own role/identity logic.
-* **Security Focus:** Short-lived JWTs, strict room isolation, comprehensive audit logging, field-level encryption for compliance tracking, and a least-privilege database role for the running app.
+* **Security Focus:** Short-lived JWTs, strict room isolation, comprehensive audit logging, field-level encryption for compliance tracking, server-to-server authentication for privileged room creation, and a least-privilege database role for the running app.
 
 ---
 
@@ -190,7 +190,7 @@ livekit-server --config livekit/livekit.yaml
 
 ### 3. Start the Backend (FastAPI)
 
-In your next terminal, navigate to the backend directory, activate your virtual environment, and start the API server. Ensure your `.env` file is properly configured with your LiveKit API Key/Secret, `DATABASE_URL` (pointed at `tachafy_app`), `MIGRATIONS_DATABASE_URL` (pointed at `postgres`), **and** both encryption keys — the app will fail to start without the latter.
+In your next terminal, navigate to the backend directory, activate your virtual environment, and start the API server. Ensure your `.env` file is properly configured with your LiveKit API Key/Secret, the server-to-server token, `DATABASE_URL` (pointed at `tachafy_app`), `MIGRATIONS_DATABASE_URL` (pointed at `postgres`), **and** both encryption keys — the app will fail to start without the latter.
 
 ```powershell
 cd backend
@@ -268,9 +268,12 @@ This workflow is designed with healthcare and enterprise security requirements i
 * **Ephemeral Rooms:** Rooms are dynamically created for specific consultations and automatically destroyed when empty or expired.
 * **Strict Role-Based Access Control (RBAC):** Access tokens are generated with specific LiveKit Video Grants, ensuring patients, doctors, and observers have strictly defined permissions (e.g., publish vs. subscribe-only).
 * **Short-Lived Tokens:** JWTs are minted with a low Time-To-Live (TTL) to minimize the attack surface in case of token interception.
+* **Server-to-Server Authentication for Room Creation:** `POST /api/consultations` requires a bearer token, compared in constant time (`hmac.compare_digest`) against `LIVEKIT_S2S_TOKEN`, so only the Tachafy backend — not any browser client — can create a room.
 * **Media & Chat Encryption:** Audio/video is protected by LiveKit's native end-to-end frame encryption; chat message content is encrypted at rest in PostgreSQL at the application layer (AES-256-GCM), same as other PII/PHI fields.
 * **Field-Level Encryption at Rest:** Participant/doctor/patient names, waiting room entries, audit event details, and chat sender identity are encrypted at the application layer (AES-256-GCM) before being written to PostgreSQL, protecting against database-level exposure (backup theft, unauthorized DB access, SQL injection dumps) even though the fields remain queryable/joinable where the application needs them to be.
 * **Comprehensive, Durable, Tamper-Evident Audit Logging:** Every critical event (room creation, token issuance, waiting-room admission/denial, host moderation actions, room termination, LiveKit webhook events) is persisted to the `audit_events` table, chained via SHA-256 row hashes (`row_hash`/`prev_row_hash`) so any historical edit is detectable on verification — surviving backend restarts, unlike the earlier in-memory implementation.
+* **Failed Webhook Verification Is Also Audited:** an invalid or missing LiveKit webhook signature is logged to `audit_events` (`event_type=webhook.verification_failed`, with source IP and a reason code — never the credential itself), not silently dropped, so attempted forgery is visible in the tamper-evident trail alongside legitimate events.
+* **Rate Limiting on Public-Facing Endpoints:** `POST /api/webhooks` is limited to 30 requests/minute per source IP, bounding how fast an attacker can generate audit-log entries via repeated failed verification attempts.
 * **Least-Privilege Database Role:** The app connects at runtime as `tachafy_app`, a non-superuser role with no `UPDATE`/`DELETE` rights on `audit_events` at all, enforced by PostgreSQL itself — see [Database Roles & Least-Privilege Access](#-database-roles--least-privilege-access).
 * **Transactional Integrity:** Consultation creation is wrapped in a database transaction; if LiveKit room creation fails, the consultation record is rolled back rather than left in an inconsistent state, while the failure itself is still recorded in the audit trail.
 
@@ -293,6 +296,12 @@ MIGRATIONS_DATABASE_URL=postgresql+asyncpg://postgres:your_superuser_password@lo
 LIVEKIT_API_URL=http://localhost:7880
 LIVEKIT_API_KEY=your_dev_key
 LIVEKIT_API_SECRET=your_dev_secret
+
+# Server-to-server authentication for privileged room-creation calls
+# (POST /api/consultations). Only the Tachafy backend should hold this
+# value — never exposed to any browser client.
+# Generate with: openssl rand -base64 32
+LIVEKIT_S2S_TOKEN=your_generated_s2s_token
 
 # Database field-level encryption (required — the app will not start without these)
 # Generate each with: openssl rand -base64 32
