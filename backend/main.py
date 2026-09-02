@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import hmac
 import json
 import logging
@@ -154,6 +154,7 @@ app.add_middleware(
 class CreateConsultationRequest(BaseModel):
     doctor_name: str = Field(default="Doctor", min_length=1, max_length=80)
     patient_name: str = Field(default="Patient", min_length=1, max_length=80)
+    external_reference: str | None = Field(default=None, max_length=64)
 
 
 class CreateConsultationResponse(BaseModel):
@@ -163,6 +164,7 @@ class CreateConsultationResponse(BaseModel):
     token_ttl_seconds: int
     status: ConsultationStatus
     ended_at: str | None
+    created: bool
 
 
 class ValidateJoinRequest(BaseModel):
@@ -967,31 +969,41 @@ async def create_consultation(
     room_name = f"tachafy-{consultation_id}"
     expires_at = utc_now() + timedelta(minutes=CONSULTATION_TTL_MINUTES)
 
-    await crud.create_consultation(
+    consultation, created = await crud.create_consultation(
         session,
         consultation_id=consultation_id,
         room_name=room_name,
         doctor_name=payload.doctor_name,
         patient_name=payload.patient_name,
         expires_at=expires_at,
+        external_reference=payload.external_reference,
     )
 
-    await crud.create_audit_event(
-        session,
-        "consultation.created",
-        consultation_id=consultation_id,
-        room_name=room_name,
-        doctor_name=payload.doctor_name,
-        patient_name=payload.patient_name,
-    )
+    if created:
+        await crud.create_audit_event(
+            session,
+            "consultation.created",
+            consultation_id=consultation.consultation_id,
+            room_name=consultation.room_name,
+            doctor_name=payload.doctor_name,
+            patient_name=payload.patient_name,
+        )
+    else:
+        await crud.create_audit_event(
+            session,
+            "consultation.create_idempotent_replay",
+            consultation_id=consultation.consultation_id,
+            external_reference=payload.external_reference,
+        )
 
     return CreateConsultationResponse(
-        consultation_id=consultation_id,
-        room_name=room_name,
-        expires_at=expires_at.isoformat(),
+        consultation_id=consultation.consultation_id,
+        room_name=consultation.room_name,
+        expires_at=consultation.expires_at.isoformat(),
         token_ttl_seconds=TOKEN_TTL_SECONDS,
-        status="active",
-        ended_at=None,
+        status=consultation.status,
+        ended_at=consultation.ended_at.isoformat() if consultation.ended_at else None,
+        created=created,
     )
 
 

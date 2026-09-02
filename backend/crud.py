@@ -30,19 +30,43 @@ async def create_consultation(
     doctor_name: str,
     patient_name: str,
     expires_at: datetime,
-) -> Consultation:
-    consultation = Consultation(
-        consultation_id=consultation_id,
-        room_name=room_name,
-        doctor_name=doctor_name,
-        patient_name=patient_name,
-        e2ee_key_version=current_e2ee_key_version(),
-        expires_at=expires_at,
-        status="active",
+    external_reference: str | None = None,
+) -> tuple[Consultation, bool]:
+    """Create a consultation idempotently for an external appointment.
+
+    Returns ``(consultation, created)``.  A NULL external reference retains
+    the existing manual-creation behaviour: every request creates a row.
+    """
+    stmt = (
+        pg_insert(Consultation)
+        .values(
+            consultation_id=consultation_id,
+            room_name=room_name,
+            doctor_name=doctor_name,
+            patient_name=patient_name,
+            e2ee_key_version=current_e2ee_key_version(),
+            expires_at=expires_at,
+            status="active",
+            external_reference=external_reference,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["external_reference"],
+            index_where=sa.text("status = 'active'"),
+        )
+        .returning(Consultation)
     )
-    session.add(consultation)
+    inserted = (await session.execute(stmt)).scalar_one_or_none()
     await session.flush()
-    return consultation
+
+    if inserted is not None:
+        return inserted, True
+
+    existing_stmt = select(Consultation).where(
+        Consultation.external_reference == external_reference,
+        Consultation.status == "active",
+    )
+    existing = (await session.execute(existing_stmt)).scalar_one()
+    return existing, False
 
 
 async def get_consultation_or_404(

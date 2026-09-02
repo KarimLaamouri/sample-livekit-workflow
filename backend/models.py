@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -97,6 +98,7 @@ class Consultation(Base):
     doctor_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     patient_name: Mapped[str] = mapped_column(EncryptedString, nullable=False)
     e2ee_key_version: Mapped[int] = mapped_column(nullable=False)
+    external_reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(
@@ -115,6 +117,12 @@ class Consultation(Base):
     __table_args__ = (
         CheckConstraint("status IN ('active', 'ended')", name="ck_consultation_status"),
         Index("ix_consultations_expires_at", "expires_at"),
+        Index(
+            "uq_consultations_external_reference_active",
+            "external_reference",
+            unique=True,
+            postgresql_where=sa.text("status = 'active'"),
+        ),
     )
 
 
