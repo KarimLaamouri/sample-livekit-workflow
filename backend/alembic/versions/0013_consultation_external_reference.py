@@ -9,7 +9,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0013_consultation_external_reference"
+revision: str = "0013_consult_ext_ref"
 down_revision: Union[str, None] = "0012_require_chat_ids"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
