@@ -1822,6 +1822,7 @@ function CallView({
   const [now, setNow] = useState(() => Date.now());
   const [tokenRequestPending, setTokenRequestPending] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [participantsOpen, setParticipantsOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const observerTokenRequested = useRef(false);
   const readyToConnect = skipPreview || deviceChoices !== null;
@@ -2108,7 +2109,7 @@ function CallView({
   }
 
   return (
-    <div className="call-shell">
+    <div className="call-shell call-shell--in-call">
       <BrandBar dark />
       <div className="call-strip">
         <div>
@@ -2138,6 +2139,13 @@ function CallView({
               >
                 {locked ? '🔒 Unlock' : '🔓 Lock'}
               </button>
+              <button
+                type="button"
+                className={`participants-toggle-button${participantsOpen ? ' active' : ''}`}
+                onClick={() => setParticipantsOpen((open) => !open)}
+              >
+                👥 Participants ({participants.length})
+              </button>
               <button type="button" className="end-button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
             </>
           )}
@@ -2155,17 +2163,10 @@ function CallView({
         </div>
       </div>
       {joinState.role === 'doctor' && (
-        <>
-          <WaitingRoomPanel
-            consultationId={consultationId}
-            participantName={joinState.participantName}
-          />
-          <ParticipantsPanel
-            participants={participants}
-            onRemoveParticipant={onRemoveParticipant}
-            onMuteParticipant={onMuteParticipant}
-          />
-        </>
+        <WaitingRoomPanel
+          consultationId={consultationId}
+          participantName={joinState.participantName}
+        />
       )}
       {connectionNotice && (
         <NoticeCard
@@ -2184,7 +2185,7 @@ function CallView({
             : undefined}
         />
       )}
-      <div className="call-stage" style={{ height: 'calc(100dvh - 116px)' }}>
+      <div className="call-stage">
         {(stage === 'connecting' || tokenRequestPending) && !connectionNotice && (
           <div className="connecting-overlay" role="status" aria-live="polite">
             <span className="spinner" aria-hidden="true" />
@@ -2218,6 +2219,57 @@ function CallView({
             <div className="custom-call-video">
               <CustomVideoGrid />
               <ControlBar />
+            </div>
+            <div className={`custom-call-participants${participantsOpen ? '' : ' custom-call-participants--collapsed'}`}>
+              <div className="custom-participants-header">
+                <h3>Participants</h3>
+                <span className="participants-badge">{participants.length}</span>
+              </div>
+              <div className="custom-participants-list">
+                {participants.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '24px 12px', color: 'rgba(243, 238, 229, 0.5)', fontSize: '13px' }}>
+                    No participants
+                  </div>
+                ) : (
+                  participants.map((participant) => (
+                    <div key={participant.identity} className="custom-participant-entry">
+                      <div className="custom-participant-info">
+                        <div className="custom-participant-name">{participant.name || participant.identity}</div>
+                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                          <span className="custom-participant-role">{participant.role || 'unknown'}</span>
+                          {participant.state && (
+                            <span style={{ fontSize: '10px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.04em', color: participant.state === 'ACTIVE' ? '#8FCBA6' : 'rgba(243, 238, 229, 0.5)' }}>
+                              {participant.state}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="custom-participant-actions">
+                        <button
+                          type="button"
+                          className="mute-button"
+                          onClick={() => void onMuteParticipant(participant.identity)}
+                          title="Mute participant"
+                          aria-label="Mute participant"
+                          style={{ width: '24px', height: '24px', padding: '0', minHeight: '24px' }}
+                        >
+                          <MicOff size={12} strokeWidth={2.25} />
+                        </button>
+                        <button
+                          type="button"
+                          className="remove-button"
+                          onClick={() => void onRemoveParticipant(participant.identity)}
+                          title="Remove participant"
+                          aria-label="Remove participant"
+                          style={{ width: '24px', height: '24px', padding: '0', minHeight: '24px' }}
+                        >
+                          <UserX size={12} strokeWidth={2.25} />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
             <div className={`custom-call-chat${chatOpen ? '' : ' custom-call-chat--collapsed'}`}>
               <CustomChat
