@@ -1216,6 +1216,76 @@ button[type='submit']::after {
   scrollbar-color: rgba(243, 238, 229, 0.2) transparent;
 }
 
+/* ── Confirmation Dialog ── */
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(32, 42, 64, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.confirm-dialog {
+  background: var(--color-surface, #FFFFFF);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  max-width: 400px;
+  width: min(90vw, 400px);
+  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.4);
+}
+
+.confirm-dialog h2 {
+  font-family: var(--font-display);
+  font-size: 20px;
+  margin: 0 0 12px;
+  color: var(--color-ink, #26314D);
+}
+
+.confirm-dialog p {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-ink-soft, #5B6479);
+  margin: 0 0 24px;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.confirm-dialog-button--cancel {
+  padding: 10px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border, #E7DECE);
+  background: transparent;
+  color: var(--color-ink, #26314D);
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--font-body);
+}
+
+.confirm-dialog-button--danger {
+  padding: 10px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger);
+  color: #FFFFFF;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: var(--font-body);
+}
+
+.confirm-dialog-button--danger:disabled,
+.confirm-dialog-button--cancel:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .custom-participants-list::-webkit-scrollbar {
   width: 6px;
 }

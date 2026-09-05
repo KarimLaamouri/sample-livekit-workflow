@@ -1762,6 +1762,97 @@ function CustomChat({
   );
 }
 
+function ConfirmDialog({
+  title,
+  message,
+  confirmLabel,
+  cancelLabel = 'Cancel',
+  danger = false,
+  busy = false,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!dialogRef.current) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onCancel();
+      }
+    };
+
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [onCancel]);
+
+  useEffect(() => {
+    if (!dialogRef.current) {
+      return;
+    }
+
+    const cancelButtonRef = dialogRef.current.querySelector('button[data-action="cancel"]');
+    if (cancelButtonRef instanceof HTMLButtonElement) {
+      cancelButtonRef.focus();
+    }
+  }, []);
+
+  const handleBackdropClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget) {
+      onCancel();
+    }
+  };
+
+  return (
+    <div className="confirm-dialog-backdrop" onClick={handleBackdropClick}>
+      <div
+        className="confirm-dialog"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+      >
+        <h2 id="confirm-dialog-title">{title}</h2>
+        <p>{message}</p>
+        <div className="confirm-dialog-actions">
+          <button
+            type="button"
+            className="confirm-dialog-button--cancel"
+            onClick={onCancel}
+            disabled={busy}
+            data-action="cancel"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            className={danger ? 'confirm-dialog-button--danger' : 'confirm-dialog-button--cancel'}
+            onClick={onConfirm}
+            disabled={busy}
+            data-action="confirm"
+          >
+            {busy ? 'Working...' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CallView({
   joinState,
   consultationExpiresAt,
@@ -1824,6 +1915,7 @@ function CallView({
   const [chatOpen, setChatOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [confirmingEnd, setConfirmingEnd] = useState(false);
   const observerTokenRequested = useRef(false);
   const readyToConnect = skipPreview || deviceChoices !== null;
   const onRequestJoinTokenRef = useRef(onRequestJoinToken);
@@ -2146,7 +2238,7 @@ function CallView({
               >
                 👥 Participants ({participants.length})
               </button>
-              <button type="button" className="end-button" onClick={onEndConsultation} disabled={busy}>End consultation</button>
+              <button type="button" className="end-button" onClick={() => setConfirmingEnd(true)} disabled={busy}>End consultation</button>
             </>
           )}
           <button
@@ -2285,6 +2377,20 @@ function CallView({
           <RoomAudioRenderer />
         </LiveKitRoom>
       </div>
+      {confirmingEnd && (
+        <ConfirmDialog
+          title="End this consultation?"
+          message="This will end the call for all participants immediately. This cannot be undone."
+          confirmLabel="End consultation"
+          danger
+          busy={busy}
+          onConfirm={() => {
+            onEndConsultation();
+            setConfirmingEnd(false);
+          }}
+          onCancel={() => setConfirmingEnd(false)}
+        />
+      )}
     </div>
   );
 }
