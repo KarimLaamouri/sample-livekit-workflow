@@ -2240,7 +2240,6 @@ function CallView({
                 <Users size={15} strokeWidth={2.25} />
                 Participants ({participants.length})
               </button>
-              <button type="button" className="end-button" onClick={() => setConfirmingEnd(true)} disabled={busy}>End consultation</button>
             </>
           )}
           <button
@@ -2254,7 +2253,9 @@ function CallView({
               <span className="chat-unread-badge">{unreadCount > 9 ? '9+' : unreadCount}</span>
             )}
           </button>
-          <button type="button" className="leave-button" onClick={() => { room.disconnect(); onLeaveCall(); }}>Leave test</button>
+          {joinState.role === 'doctor' && (
+            <button type="button" className="end-button" onClick={() => setConfirmingEnd(true)} disabled={busy}>End consultation</button>
+          )}
         </div>
       </div>
       {joinState.role === 'doctor' && (

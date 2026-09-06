@@ -449,16 +449,6 @@ button[type='submit']::after {
   background: var(--color-danger-ink);
 }
 
-.call-strip .leave-button {
-  background: transparent;
-  color: var(--shell-strip-fg);
-  border: 1px solid rgba(243, 238, 229, 0.25);
-}
-
-.call-strip .leave-button:hover:not(:disabled) {
-  background: rgba(243, 238, 229, 0.08);
-}
-
 .prejoin-stage {
   display: flex;
   flex-direction: column;
