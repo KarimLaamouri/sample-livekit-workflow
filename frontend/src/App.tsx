@@ -12,7 +12,7 @@ import {
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { ExternalE2EEKeyProvider, Room, Track, RoomEvent, DisconnectReason } from 'livekit-client';
-import { MicOff, UserX, Lock } from 'lucide-react';
+import { MicOff, UserX, Lock, Unlock, Users, MessageSquare } from 'lucide-react';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -2229,14 +2229,16 @@ function CallView({
                 onClick={() => locked ? void onUnlockConsultation() : void onLockConsultation()}
                 disabled={busy}
               >
-                {locked ? '🔒 Unlock' : '🔓 Lock'}
+                {locked ? <Unlock size={15} strokeWidth={2.25} /> : <Lock size={15} strokeWidth={2.25} />}
+                {locked ? 'Unlock' : 'Lock'}
               </button>
               <button
                 type="button"
                 className={`participants-toggle-button${participantsOpen ? ' active' : ''}`}
                 onClick={() => setParticipantsOpen((open) => !open)}
               >
-                👥 Participants ({participants.length})
+                <Users size={15} strokeWidth={2.25} />
+                Participants ({participants.length})
               </button>
               <button type="button" className="end-button" onClick={() => setConfirmingEnd(true)} disabled={busy}>End consultation</button>
             </>
@@ -2246,7 +2248,8 @@ function CallView({
             className={`chat-toggle-button${chatOpen ? ' active' : ''}`}
             onClick={() => setChatOpen((open) => !open)}
           >
-            💬 Chat
+            <MessageSquare size={15} strokeWidth={2.25} />
+            Chat
             {!chatOpen && unreadCount > 0 && (
               <span className="chat-unread-badge">{unreadCount > 9 ? '9+' : unreadCount}</span>
             )}

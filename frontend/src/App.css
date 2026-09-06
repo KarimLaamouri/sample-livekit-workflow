@@ -688,6 +688,46 @@ button[type='submit']::after {
   content: none;
 }
 
+.call-strip .lock-button,
+.call-strip .participants-toggle-button,
+.call-strip .chat-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lock-button {
+  background: transparent;
+  color: var(--shell-strip-fg);
+  border: 1px solid rgba(243, 238, 229, 0.25);
+}
+
+.lock-button:hover:not(:disabled) {
+  background: rgba(243, 238, 229, 0.08);
+}
+
+.lock-button.locked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #ffffff;
+}
+
+.participants-toggle-button {
+  background: transparent;
+  color: var(--shell-strip-fg);
+  border: 1px solid rgba(243, 238, 229, 0.25);
+}
+
+.participants-toggle-button:hover:not(:disabled) {
+  background: rgba(243, 238, 229, 0.08);
+}
+
+.participants-toggle-button.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #ffffff;
+}
+
 .chat-unread-badge {
   display: inline-flex;
   align-items: center;
