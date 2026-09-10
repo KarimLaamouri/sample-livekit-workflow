@@ -596,6 +596,8 @@ button[type='submit']::after {
   min-width: 0;
   min-height: 0;
   gap: 12px;
+  overflow: hidden;
+  container-type: inline-size;
 }
 
 /* 1. Wrapper fills all available height and width */
@@ -643,14 +645,51 @@ button[type='submit']::after {
 }
 
 .custom-call-video .lk-control-bar {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  max-width: 100%;
   align-self: center;
+  justify-content: center;
   background: rgba(32, 42, 64, 0.92);
   border: 1px solid rgba(243, 238, 229, 0.1);
   border-radius: var(--radius-pill);
   padding: 8px 10px;
   box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(8px);
+}
+
+@container (max-width: 680px) {
+  .custom-call-video .lk-control-bar .lk-button-group-container span,
+  .custom-call-video .lk-control-bar button > span:not(.lk-button-group-menu) {
+    display: none;
+  }
+
+  .custom-call-video .lk-control-bar .lk-button:not(.lk-button-menu) {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .custom-call-video .lk-control-bar .lk-button {
+    padding: 10px;
+    min-width: 40px;
+  }
+}
+
+@media (max-width: 900px) {
+  .custom-call-video .lk-control-bar .lk-button-group-container span,
+  .custom-call-video .lk-control-bar button > span:not(.lk-button-group-menu) {
+    display: none; /* hide text labels, keep icons */
+  }
+
+  .custom-call-video .lk-control-bar .lk-button:not(.lk-button-menu) {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .custom-call-video .lk-control-bar .lk-button {
+    padding: 10px;
+    min-width: 40px;
+  }
 }
 
 .chat-toggle-button {
