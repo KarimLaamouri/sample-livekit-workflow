@@ -2313,82 +2313,80 @@ function CallView({
               <ControlBar />
             </div>
             <div className={`custom-call-panel${activePanel ? '' : ' custom-call-panel--collapsed'}`}>
-              {activePanel && (
-                <>
-                  <div className="custom-call-panel-header">
-                    <h3>{activePanel === 'participants' ? 'Participants' : 'Chat'}</h3>
-                    {activePanel === 'participants' && (
-                      <span className="participants-badge">{participants.length}</span>
-                    )}
-                    <button
-                      type="button"
-                      className="custom-call-panel-close"
-                      onClick={() => setActivePanel(null)}
-                      aria-label="Close panel"
-                    >
-                      <X size={16} strokeWidth={2.25} />
-                    </button>
-                  </div>
-                  <div className="custom-call-panel-body">
-                    {activePanel === 'participants' ? (
-                      <div className="custom-participants-list">
-                        {participants.length === 0 ? (
-                          <div style={{ textAlign: 'center', padding: '24px 12px', color: 'rgba(243, 238, 229, 0.5)', fontSize: '13px' }}>
-                            No participants
+              <div className="custom-call-panel-header">
+                <h3>{activePanel === 'participants' ? 'Participants' : 'Chat'}</h3>
+                {activePanel === 'participants' && (
+                  <span className="participants-badge">{participants.length}</span>
+                )}
+                <button
+                  type="button"
+                  className="custom-call-panel-close"
+                  onClick={() => setActivePanel(null)}
+                  aria-label="Close panel"
+                >
+                  <X size={16} strokeWidth={2.25} />
+                </button>
+              </div>
+              <div className="custom-call-panel-body">
+                <div
+                  className="custom-participants-list"
+                  style={{ display: activePanel === 'participants' ? 'flex' : 'none' }}
+                >
+                  {participants.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '24px 12px', color: 'rgba(243, 238, 229, 0.5)', fontSize: '13px' }}>
+                      No participants
+                    </div>
+                  ) : (
+                    participants.map((participant) => (
+                      <div key={participant.identity} className="custom-participant-entry">
+                        <div className="custom-participant-info">
+                          <div className="custom-participant-name">{participant.name || participant.identity}</div>
+                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            <span className="custom-participant-role">{participant.role || 'unknown'}</span>
+                            {participant.state && (
+                              <span style={{ fontSize: '10px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.04em', color: participant.state === 'ACTIVE' ? '#8FCBA6' : 'rgba(243, 238, 229, 0.5)' }}>
+                                {participant.state}
+                              </span>
+                            )}
                           </div>
-                        ) : (
-                          participants.map((participant) => (
-                            <div key={participant.identity} className="custom-participant-entry">
-                              <div className="custom-participant-info">
-                                <div className="custom-participant-name">{participant.name || participant.identity}</div>
-                                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                                  <span className="custom-participant-role">{participant.role || 'unknown'}</span>
-                                  {participant.state && (
-                                    <span style={{ fontSize: '10px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.04em', color: participant.state === 'ACTIVE' ? '#8FCBA6' : 'rgba(243, 238, 229, 0.5)' }}>
-                                      {participant.state}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="custom-participant-actions">
-                                <button
-                                  type="button"
-                                  className="mute-button"
-                                  onClick={() => void onMuteParticipant(participant.identity)}
-                                  title="Mute participant"
-                                  aria-label="Mute participant"
-                                  style={{ width: '24px', height: '24px', padding: '0', minHeight: '24px' }}
-                                >
-                                  <MicOff size={12} strokeWidth={2.25} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="remove-button"
-                                  onClick={() => void onRemoveParticipant(participant.identity)}
-                                  title="Remove participant"
-                                  aria-label="Remove participant"
-                                  style={{ width: '24px', height: '24px', padding: '0', minHeight: '24px' }}
-                                >
-                                  <UserX size={12} strokeWidth={2.25} />
-                                </button>
-                              </div>
-                            </div>
-                          ))
-                        )}
+                        </div>
+                        <div className="custom-participant-actions">
+                          <button
+                            type="button"
+                            className="mute-button"
+                            onClick={() => void onMuteParticipant(participant.identity)}
+                            title="Mute participant"
+                            aria-label="Mute participant"
+                            style={{ width: '24px', height: '24px', padding: '0', minHeight: '24px' }}
+                          >
+                            <MicOff size={12} strokeWidth={2.25} />
+                          </button>
+                          <button
+                            type="button"
+                            className="remove-button"
+                            onClick={() => void onRemoveParticipant(participant.identity)}
+                            title="Remove participant"
+                            aria-label="Remove participant"
+                            style={{ width: '24px', height: '24px', padding: '0', minHeight: '24px' }}
+                          >
+                            <UserX size={12} strokeWidth={2.25} />
+                          </button>
+                        </div>
                       </div>
-                    ) : (
-                      <CustomChat
-                        consultationId={consultationId}
-                        joinState={joinState}
-                        onLoadChatHistory={onLoadChatHistory}
-                        onSendChatMessage={onSendChatMessage}
-                        isOpen={activePanel === 'chat'}
-                        onUnreadChange={setUnreadCount}
-                      />
-                    )}
-                  </div>
-                </>
-              )}
+                    ))
+                  )}
+                </div>
+                <div style={{ display: activePanel === 'chat' ? 'flex' : 'none', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+                  <CustomChat
+                    consultationId={consultationId}
+                    joinState={joinState}
+                    onLoadChatHistory={onLoadChatHistory}
+                    onSendChatMessage={onSendChatMessage}
+                    isOpen={activePanel === 'chat'}
+                    onUnreadChange={setUnreadCount}
+                  />
+                </div>
+              </div>
             </div>
           </div>
           <RoomAudioRenderer />
