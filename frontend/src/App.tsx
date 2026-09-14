@@ -1745,7 +1745,6 @@ function CustomChat({
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void sendMessage()}
           placeholder="Type a message…"
-          disabled={sending}
         />
         <button
           type="button"
