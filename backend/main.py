@@ -18,6 +18,7 @@ from google.protobuf.json_format import MessageToDict
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.responses import Response
 from google.protobuf.message import Message
 from livekit import api
 from pydantic import BaseModel, Field
@@ -1736,6 +1737,7 @@ async def get_consultation_history(
 @limiter.limit("30/minute")
 async def livekit_webhook(
     request: Request,
+    response: Response,
     authorization: str = Header(None),
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
