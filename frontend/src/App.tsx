@@ -1891,6 +1891,8 @@ function CallView({
 
   const { room, keyProvider, worker } = roomStateRef.current;
 
+  const [isReconnecting, setIsReconnecting] = useState(false);
+
   useEffect(() => {
     const handleDisconnected = () => {
       worker.terminate();
@@ -1900,6 +1902,21 @@ function CallView({
       room.off(RoomEvent.Disconnected, handleDisconnected);
     };
   }, [room, worker]);
+
+  useEffect(() => {
+    const handleReconnecting = () => setIsReconnecting(true);
+    const handleReconnected = () => setIsReconnecting(false);
+    const handleDisconnected = () => setIsReconnecting(false);
+
+    room.on(RoomEvent.Reconnecting, handleReconnecting);
+    room.on(RoomEvent.Reconnected, handleReconnected);
+    room.on(RoomEvent.Disconnected, handleDisconnected);
+    return () => {
+      room.off(RoomEvent.Reconnecting, handleReconnecting);
+      room.off(RoomEvent.Reconnected, handleReconnected);
+      room.off(RoomEvent.Disconnected, handleDisconnected);
+    };
+  }, [room]);
 
   const skipPreview = joinState.role === 'observer';
   const [stage, setStage] = useState<'preview' | 'connecting' | 'call'>(skipPreview ? 'connecting' : 'preview');
@@ -2287,6 +2304,12 @@ function CallView({
                   : 'Connecting to your provider-managed room...'}
               </span>
             </p>
+          </div>
+        )}
+        {stage === 'call' && isReconnecting && (
+          <div className="reconnecting-banner" role="status" aria-live="polite">
+            <span className="spinner" aria-hidden="true" />
+            <p>Reconnecting… your video may be temporarily paused.</p>
           </div>
         )}
         <LiveKitRoom
